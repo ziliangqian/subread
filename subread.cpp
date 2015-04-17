@@ -48,14 +48,11 @@ void encodeRead(string& read, CODE_TYPE (&codes)[400], int gap_size){
             if(read_i>=CODE_SIZE && (read_i%CODE_SIZE)<gap_i){
                 code_i = (read_i/CODE_SIZE)*gap_size - gap_size + gap_i;
                 code_bit_shift = (read_i%CODE_SIZE)+CODE_SIZE-gap_i;
-                //cout<<"R";
             }else{
                 code_i = (read_i/CODE_SIZE)*gap_size + gap_i;
-                //cout<<"F";
             }
             CODE_TYPE& code = codes[code_i];
             code = code | (bitCode(a)<<(2*code_bit_shift));
-            //cout<<"NT#"<<read_i<<"\t"<<a<<"\tCODE#"<<code_i<<"\tSHT:"<<code_bit_shift<<"\t"<<bitset<32>(code)<<endl;
         }
     }
     /*debug: dump the codes
@@ -93,6 +90,11 @@ inline int element_eq(const void * p1, const void * p2){
 struct CODE_POS_PAIR{
     CODE_TYPE code;
     unsigned int pos;
+    bool operator ==(const CODE_POS_PAIR& right){return this->code==right.code;}
+    bool operator !=(const CODE_POS_PAIR& right){return this->code!=right.code;}
+    bool operator ==(const unsigned int& right){return this->code==right;}
+    bool operator !=(const unsigned int& right){return this->code!=right;}
+    unsigned int operator %(const unsigned int& right){return this->code%right;}
 };
 unsigned int myhash2(const void* elem){
     const unsigned int v = ((const CODE_POS_PAIR*) elem)->code;
@@ -122,7 +124,10 @@ inline unsigned int magichash(const void* elem) {
     x = ((x >> 16) ^ x);
     return x;
 }
-/*fastest one*/
+/* fastest one
+ * use 64 bit to generate 2 code once 
+ * https://github.com/preshing/CompareIntegerMaps
+ */
 inline unsigned int preshhash(const void* elem){
     uint32_t h = ((const CODE_POS_PAIR*) elem)->code;
     h ^= h >> 16;
@@ -149,6 +154,9 @@ string readFileAsString(string filename){
 
     return string(buffer);
 }
+// test super hashset
+#include "ZillionIntSet.h"
+ZillionIntSet<CODE_POS_PAIR> codeset;
 void hashRefGenome(string filename){
     stringstream ss( readFileAsString(filename) );
     string line;
@@ -170,6 +178,7 @@ void hashRefGenome(string filename){
         CODE_POS_PAIR* p_codepos = new CODE_POS_PAIR;
         p_codepos->code = encodeSubread(genome.substr(i, 16).c_str());
         p_codepos->pos = i;
+
         CODE_POS_PAIR* val = (CODE_POS_PAIR*)htab_find(refGen_hash, p_codepos);
         if(val==0){
             CODE_POS_PAIR** addr = (CODE_POS_PAIR**) htab_find_slot(refGen_hash, p_codepos, INSERT);
