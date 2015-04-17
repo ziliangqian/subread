@@ -180,10 +180,11 @@ int main(int argc, char* argv[]){
             p_codepos->code = codes[i];
             p_codepos->pos = i;
             CODE_POS_PAIR* val = (CODE_POS_PAIR*)htab_find(refGen_hash, p_codepos);
-            unsigned int pos = val->pos-i;
             if( val==0 ) continue; // no genome hit, continue
             // other wise, put it into basket
+            unsigned int pos = val->pos-i;
             bool inserted = false;
+            /*
             for(int b_i=0; b_i<10; b_i++){
                 if( baskets[b_i*2]==0 
                         || baskets[b_i*2]==pos ){
@@ -192,7 +193,7 @@ int main(int argc, char* argv[]){
                     inserted = true;
                     break;
                 }
-            }
+            }*/
             if( inserted == false ) c_not_in_basket++;
         }
     }
