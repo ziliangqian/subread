@@ -3,6 +3,7 @@
 #include <iostream>
 #include <string>
 #include <bitset>
+#include <ctime>
 
 using namespace std;
 
@@ -103,6 +104,34 @@ unsigned int myhash2(const void* elem){
     mix (a, b, c);
     return c;
 }
+/*wong's page on integers hash, second one in perfor
+ * http://burtleburtle.net/bob/hash/integer.html */
+inline uint32_t wonghash(const void* elem){
+    uint32_t a = ((const CODE_POS_PAIR*) elem)->code;
+    a = (a ^ 61) ^ (a >> 16);
+    a = a + (a << 3);
+    a = a ^ (a >> 4);
+    a = a * 0x27d4eb2d;
+    a = a ^ (a >> 15);
+    return a;
+}
+inline unsigned int magichash(const void* elem) {
+    uint32_t x = ((const CODE_POS_PAIR*) elem)->code;
+    x = ((x >> 16) ^ x) * 0x45d9f3b;
+    x = ((x >> 16) ^ x) * 0x45d9f3b;
+    x = ((x >> 16) ^ x);
+    return x;
+}
+/*fastest one*/
+inline unsigned int preshhash(const void* elem){
+    uint32_t h = ((const CODE_POS_PAIR*) elem)->code;
+    h ^= h >> 16;
+    h *= 0x85ebca6b;
+    h ^= h >> 13;
+    h *= 0xc2b2ae35;
+    h ^= h >> 16;
+    return h;
+}
 inline unsigned int myhash(const void* elem){
     const CODE_POS_PAIR* pcode = ((const CODE_POS_PAIR*) elem);
     return (pcode->code>>4)+((pcode->code&0x4)<<24);
@@ -128,7 +157,7 @@ void hashRefGenome(string filename){
         genome+=line;
     }
     refGen_hash = htab_create_alloc(1024, 
-            myhash2, 
+            preshhash, 
             element_eq,
             delete_element, 
             calloc,
@@ -137,7 +166,7 @@ void hashRefGenome(string filename){
     unsigned int count_total_hit = 0;
     unsigned int count_multiple_hit = 0;
     CODE_TYPE code = 0;
-    for(unsigned int i=0; i<genome.size()-16; i+=CODE_SIZE/8){
+    for(unsigned int i=0; i<genome.size()-16; i+=CODE_SIZE/16){
         CODE_POS_PAIR* p_codepos = new CODE_POS_PAIR;
         p_codepos->code = encodeSubread(genome.substr(i, 16).c_str());
         p_codepos->pos = i;
@@ -154,7 +183,9 @@ void hashRefGenome(string filename){
 int main(int argc, char* argv[]){
     if( argc<=2 ){ cout<<"program <ref_genome> <fastaq>"<<endl; return 0; }
 
+    cout<<"current time in ms\t"<<(std::time(0))<<endl;
     hashRefGenome(argv[1]);
+    cout<<"current time in ms\t"<<(std::time(0))<<endl;
 
     unsigned int baskets[20];
     CODE_TYPE codes[400];
@@ -169,14 +200,13 @@ int main(int argc, char* argv[]){
         if( line.size()>380 ) { cerr<<"WARN: read too long! take firt 384 bps"<<endl; line=line.substr(0,384); }
         std::memset(&baskets, 0, 20*sizeof(unsigned int));
         std::memset(&codes, 0, 400*sizeof(unsigned int));
-        encodeRead(line, codes, CODE_SIZE/8);
+        encodeRead(line, codes, CODE_SIZE);
         CODE_POS_PAIR* p_codepos = new CODE_POS_PAIR;
         for(int i=0; i<line.size()&i<400; i++){
             p_codepos->code = codes[i];
             p_codepos->pos = i;
             CODE_POS_PAIR* val = (CODE_POS_PAIR*)htab_find(refGen_hash, p_codepos);
             if( val==0 ) continue; // no genome hit, continue
-            /*
             // other wise, put it into basket
             unsigned int pos = val->pos-i;
             bool inserted = false;
@@ -191,9 +221,7 @@ int main(int argc, char* argv[]){
                 }
             }
             if( inserted == false ) c_not_in_basket++;
-            */
         }
-        /*
         unsigned int max_count = baskets[0];
         unsigned int max_count_b_i = baskets[1];
         for(int b_i=1; b_i<10; b_i++){
@@ -204,9 +232,10 @@ int main(int argc, char* argv[]){
         }
         if(max_count>7){
             c_hit_read++;
-        }*/
+        }
     }
 
+    cout<<"current time in ms\t"<<std::time(0)<<endl;
     cout<<"done with hits:"<<c_hit_read<<endl;
 }
 
