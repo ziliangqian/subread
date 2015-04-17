@@ -101,7 +101,7 @@ struct CODE_POS_PAIR{
 };
 htab_t refGen_hash;
 string genome;
-void hashRefGenome(string filename){
+string readFileAsString(string filename){
     FILE* pfile = fopen(filename.c_str(), "rb");
     fseek(pfile, 0, SEEK_END);
     unsigned long length = ftell(pfile);
@@ -110,13 +110,16 @@ void hashRefGenome(string filename){
     fread(buffer, 1, length, pfile);
     fclose(pfile);
 
-    stringstream ss(buffer);
+    return string(buffer);
+}
+
+void hashRefGenome(string filename){
+    stringstream ss( readFileAsString(filename) );
     string line;
     for(;getline(ss, line, '\n');){
         if(line[0]=='>') continue;
         genome+=line;
     }
-
     refGen_hash = htab_create_alloc(1024, 
             myhash, 
             element_eq,
@@ -159,5 +162,39 @@ int main(int argc, char* argv[]){
     encodeRead(read, codes, 16);
 
     hashRefGenome("chr1.fa");
+
+    unsigned int baskets[20];
+    // read in the fastq file
+    stringstream ss( readFileAsString(argv[1]) );
+    string line;
+    unsigned int lc=0;
+    unsigned int c_not_in_basket = 0;
+    for(;getline(ss, line, '\n');){
+        if( ((++lc)%4)!=2 ) continue;
+        if( line.size()>380 ) { cerr<<"WARN: read too long! take firt 384 bps"<<endl; line=line.substr(0,384); }
+        std::memset(&baskets, 0, 20*sizeof(unsigned int));
+        std::memset(&codes, 0, 400*sizeof(unsigned int));
+        encodeRead(line, codes, 16);
+        for(int i=0; i<line.size()&i<400; i++){
+            CODE_POS_PAIR* p_codepos = new CODE_POS_PAIR;
+            p_codepos->code = codes[i];
+            p_codepos->pos = i;
+            CODE_POS_PAIR* val = (CODE_POS_PAIR*)htab_find(refGen_hash, p_codepos);
+            unsigned int pos = val->pos-i;
+            if( val==0 ) continue; // no genome hit, continue
+            // other wise, put it into basket
+            bool inserted = false;
+            for(int b_i=0; b_i<10; b_i++){
+                if( baskets[b_i*2]==0 
+                        || baskets[b_i*2]==pos ){
+                    baskets[b_i*2]=pos;
+                    baskets[b_i*2+1]++;
+                    inserted = true;
+                    break;
+                }
+            }
+            if( inserted == false ) c_not_in_basket++;
+        }
+    }
 }
 
