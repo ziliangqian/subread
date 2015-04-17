@@ -28,8 +28,13 @@ inline CODE_TYPE encodeSubread(const char* subread){
     }
     return code;
 }
-inline void decodeSubread(char (&subread)[CODE_SIZE], unsigned int code){
+inline void decodeSubread(char* subread, unsigned int code){
     for(int i=0; i<CODE_SIZE; i++) subread[i] = charset[ ((code>>(2*i))&0x3) ];
+}
+inline string decodeSubread(unsigned int code){
+    char nt[CODE_SIZE+1]; decodeSubread(nt, code);
+    nt[CODE_SIZE]=0;
+    return string(nt);
 }
 
 void encodeRead(string& read, CODE_TYPE (&codes)[400], int gap_size){
@@ -69,7 +74,7 @@ void delete_element(void * ref){
     unsigned int* p=(unsigned int*)ref;
     (*p)=0;
 }
-int element_eq(const void * p1, const void * p2){
+inline int element_eq(const void * p1, const void * p2){
     return (*(unsigned int*)p1)==(*(unsigned int*)p2);
 }
 #define mix(a,b,c) \
@@ -84,8 +89,12 @@ int element_eq(const void * p1, const void * p2){
     b -= c; b -= a; b = (b ^ (a<<10)) & 0xffffffff; \
     c -= a; c -= b; c = (c ^ (b>>15)) & 0xffffffff; \
 }
-unsigned int myhash(const void* elem){
-    const unsigned int v = *((const unsigned int*) elem);
+struct CODE_POS_PAIR{
+    CODE_TYPE code;
+    unsigned int pos;
+};
+unsigned int myhash2(const void* elem){
+    const unsigned int v = ((const CODE_POS_PAIR*) elem)->code;
     unsigned a, b, c;
     a = b = 0x9e3779b9;
     a += v >> (sizeof (intptr_t) * CHAR_BIT / 2);
@@ -94,11 +103,10 @@ unsigned int myhash(const void* elem){
     mix (a, b, c);
     return c;
 }
-
-struct CODE_POS_PAIR{
-    CODE_TYPE code;
-    unsigned int pos;
-};
+inline unsigned int myhash(const void* elem){
+    const CODE_POS_PAIR* pcode = ((const CODE_POS_PAIR*) elem);
+    return (pcode->code>>4)+((pcode->code&0x4)<<24);
+}
 htab_t refGen_hash;
 string genome;
 string readFileAsString(string filename){
@@ -112,7 +120,6 @@ string readFileAsString(string filename){
 
     return string(buffer);
 }
-
 void hashRefGenome(string filename){
     stringstream ss( readFileAsString(filename) );
     string line;
@@ -121,7 +128,7 @@ void hashRefGenome(string filename){
         genome+=line;
     }
     refGen_hash = htab_create_alloc(1024, 
-            myhash, 
+            myhash2, 
             element_eq,
             delete_element, 
             calloc,
@@ -130,7 +137,7 @@ void hashRefGenome(string filename){
     unsigned int count_total_hit = 0;
     unsigned int count_multiple_hit = 0;
     CODE_TYPE code = 0;
-    for(unsigned int i=0; i<genome.size()-16; i+=CODE_SIZE){
+    for(unsigned int i=0; i<genome.size()-16; i+=CODE_SIZE/8){
         CODE_POS_PAIR* p_codepos = new CODE_POS_PAIR;
         p_codepos->code = encodeSubread(genome.substr(i, 16).c_str());
         p_codepos->pos = i;
@@ -145,57 +152,61 @@ void hashRefGenome(string filename){
 }
 
 int main(int argc, char* argv[]){
-    char seq[CODE_SIZE]={'A', 'G', 'T', 'T',
-        'A', 'G', 'T', 'T',
-        'A', 'G', 'T', 'T',
-        'A', 'G', 'T', 'T'};
-    unsigned int code = encodeSubread(seq);
-    char de[CODE_SIZE];
-    decodeSubread(de, code);
-    de[15]=0;
-    seq[15]=0;
-    cout<<string(seq)<<"\t"<<bitset<32>(code)<<"\t"<<string(de)<<endl;
+    if( argc<=2 ){ cout<<"program <ref_genome> <fastaq>"<<endl; return 0; }
 
-    string read="ACCGTAGTACGTACGTTTATTTAAAAACCCCGGGTTTAATAAGTGT";
-    CODE_TYPE codes[400];
-    std::memset(&codes, 0, 400*sizeof(unsigned int));
-    encodeRead(read, codes, 16);
-
-    hashRefGenome("chr1.fa");
+    hashRefGenome(argv[1]);
 
     unsigned int baskets[20];
+    CODE_TYPE codes[400];
     // read in the fastq file
-    stringstream ss( readFileAsString(argv[1]) );
+    stringstream ss( readFileAsString(argv[2]) );
     string line;
     unsigned int lc=0;
     unsigned int c_not_in_basket = 0;
+    unsigned int c_hit_read = 0;
     for(;getline(ss, line, '\n');){
         if( ((++lc)%4)!=2 ) continue;
         if( line.size()>380 ) { cerr<<"WARN: read too long! take firt 384 bps"<<endl; line=line.substr(0,384); }
         std::memset(&baskets, 0, 20*sizeof(unsigned int));
         std::memset(&codes, 0, 400*sizeof(unsigned int));
-        encodeRead(line, codes, 16);
+        encodeRead(line, codes, CODE_SIZE/8);
+        CODE_POS_PAIR* p_codepos = new CODE_POS_PAIR;
         for(int i=0; i<line.size()&i<400; i++){
-            CODE_POS_PAIR* p_codepos = new CODE_POS_PAIR;
             p_codepos->code = codes[i];
             p_codepos->pos = i;
             CODE_POS_PAIR* val = (CODE_POS_PAIR*)htab_find(refGen_hash, p_codepos);
             if( val==0 ) continue; // no genome hit, continue
+            /*
             // other wise, put it into basket
             unsigned int pos = val->pos-i;
             bool inserted = false;
-            /*
             for(int b_i=0; b_i<10; b_i++){
                 if( baskets[b_i*2]==0 
                         || baskets[b_i*2]==pos ){
                     baskets[b_i*2]=pos;
                     baskets[b_i*2+1]++;
                     inserted = true;
+                    //cout<<"insert into bsk#"<<b_i<<"\t"<<baskets[b_i*2+1]<<"\tread line#"<<lc<<endl;
                     break;
                 }
-            }*/
+            }
             if( inserted == false ) c_not_in_basket++;
+            */
         }
+        /*
+        unsigned int max_count = baskets[0];
+        unsigned int max_count_b_i = baskets[1];
+        for(int b_i=1; b_i<10; b_i++){
+            if( baskets[2*b_i+1] > max_count ){
+                max_count = baskets[2*b_i+1];
+                max_count_b_i = b_i;
+            }
+        }
+        if(max_count>7){
+            c_hit_read++;
+        }*/
     }
+
+    cout<<"done with hits:"<<c_hit_read<<endl;
 }
 
