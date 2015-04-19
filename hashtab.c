@@ -996,3 +996,4 @@ hash_pointer (const PTR p)
   mix (a, b, c);
   return c;
 }
+

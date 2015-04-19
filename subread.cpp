@@ -174,7 +174,7 @@ void hashRefGenome(string filename){
     unsigned int count_collisions = 0;
     unsigned int count_2nd_hit = 0;
     CODE_TYPE code = 0;
-    for(unsigned int i=0; i<genome.size()-16; i+=CODE_SIZE/16){
+    for(unsigned int i=0; i<genome.size()-16; i+=CODE_SIZE){
         CODE_POS_PAIR* p_codepos = new CODE_POS_PAIR;
         p_codepos->code = encodeSubread(genome.substr(i, 16).c_str());
         p_codepos->pos = i;
@@ -217,6 +217,21 @@ void hashRefGenome(string filename){
     }
     cout<<"TOTAL:"<<count_total_hit<<"\tMULTI:"<<count_multiple_hit<<"\tTODO:"<<count_2nd_hit<<"\t";
 }
+int save_genome(const char* filename){
+    FILE *pfile = fopen(filename, "wb");
+    fwrite(refGen_hash, sizeof(htab), 1, pfile); 
+    fwrite(*(refGen_hash->entries), sizeof(CODE_POS_PAIR), refGen_hash->size, pfile);
+    fclose(pfile);
+    return 0;
+}
+void load_genome(const char* filename){
+    FILE *pfile = fopen(filename, "rb");
+    refGen_hash = new htab;
+    fread(refGen_hash, sizeof(htab), 1, pfile); 
+    (*(refGen_hash->entries)) = new CODE_POS_PAIR[refGen_hash->size];
+    fread(*(refGen_hash->entries), sizeof(CODE_POS_PAIR), refGen_hash->size, pfile);
+    fclose(pfile);
+}
 
 int main(int argc, char* argv[]){
     if( argc<=2 ){ cout<<"program <ref_genome> <fastaq>"<<endl; return 0; }
@@ -224,6 +239,8 @@ int main(int argc, char* argv[]){
     cout<<"current time in ms\t"<<(std::time(0))<<endl;
     hashRefGenome(argv[1]);
     cout<<"current time in ms\t"<<(std::time(0))<<endl;
+    // save the genome
+    save_genome( (string(argv[1])+".genome").c_str() );
 
     unsigned int baskets[20];
     CODE_TYPE codes[400];
@@ -262,7 +279,7 @@ int main(int argc, char* argv[]){
                     baskets[b_i*2]=pos;
                     baskets[b_i*2+1]++;
                     inserted = true;
-                    //cout<<"insert into bsk#"<<b_i<<"\t"<<baskets[b_i*2+1]<<"\tread line#"<<lc<<"\tcode#"<<i<<endl;
+                    //cout<<"insert into bsk#"<<b_i<<"\t"<<baskets[b_i*2]<<":"<<baskets[b_i*2+1]<<"\tread line#"<<lc<<"\tcode#"<<i<<endl;
                     break;
                 }
             }
@@ -275,7 +292,7 @@ int main(int argc, char* argv[]){
                 max_count = baskets[2*b_i+1];
                 max_count_b_i = b_i;
             }
-            //cout<<"basket#"<<b_i<<"\tpos="<<baskets[b_i*2]<<"\tcount="<<baskets[b_i*2+1]<<"\tmax_hit="<<max_count_b_i<<" in "<<max_count<<endl;
+            //cout<<"basket#"<<b_i<<"\tpos="<<baskets[b_i*2]<<"\tcount="<<baskets[b_i*2+1]<<"\tmax_hit bkt#="<<max_count_b_i<<" count= "<<max_count<<endl;
         }
         if(max_count<6) continue;
         c_hit_read++;

@@ -139,6 +139,10 @@ struct htab {
   unsigned int size_prime_index;
 };
 
+/*extern int htab_persist(char* filename);
+extern htab htab_load(char* filename);
+*/
+
 typedef struct htab *htab_t;
 
 /* An enum saying whether we insert into the hash table or not.  */
