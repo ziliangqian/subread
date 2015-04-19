@@ -597,6 +597,7 @@ htab_find_with_hash (htab_t htab, const PTR element, hashval_t hash)
       || (entry != HTAB_DELETED_ENTRY && (*htab->eq_f) (entry, element)))
     return entry;
   hash2 = htab_mod_m2 (hash, htab);
+  //for (int i=0;i<MAX_COLLISIONS;i++) // skip the 1% code with too many collisions
   for (;;)
     {
       htab->collisions++;
@@ -609,6 +610,7 @@ htab_find_with_hash (htab_t htab, const PTR element, hashval_t hash)
 	  || (entry != HTAB_DELETED_ENTRY && (*htab->eq_f) (entry, element)))
 	return entry;
     }
+  return 0; //Ziliang, can't find the entry
 }
 
 /* Like htab_find_slot_with_hash, but compute the hash value from the

@@ -39,6 +39,8 @@ extern "C" {
 
 #include "ansidecl.h"
 
+#define MAX_COLLISIONS 10 
+
 /* The type for a hash code.  */
 typedef unsigned int hashval_t;
 
