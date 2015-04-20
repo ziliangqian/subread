@@ -220,27 +220,80 @@ void hashRefGenome(string filename){
 int save_genome(const char* filename){
     FILE *pfile = fopen(filename, "wb");
     fwrite(refGen_hash, sizeof(htab), 1, pfile); 
-    fwrite(*(refGen_hash->entries), sizeof(CODE_POS_PAIR), refGen_hash->size, pfile);
+    for(int i=0; i<refGen_hash->size; i++){
+        CODE_POS_PAIR* pdata_entry = (CODE_POS_PAIR*) refGen_hash->entries[i];
+        if( pdata_entry == HTAB_DELETED_ENTRY || pdata_entry==HTAB_EMPTY_ENTRY ){
+            pdata_entry = new CODE_POS_PAIR;
+            pdata_entry->code = 0;
+            pdata_entry->pos = 0;
+        }
+        fwrite( pdata_entry, sizeof(CODE_POS_PAIR), 1, pfile );
+    }
     fclose(pfile);
     return 0;
 }
-void load_genome(const char* filename){
-    FILE *pfile = fopen(filename, "rb");
+unsigned int load_genome(const char* filename){
+
+    cout<<"read in .genome file ["<<filename<<"]"<<endl;
+    FILE *pfile = fopen( ((string(filename)+".genome").c_str()), "rb");
+    if(pfile==0) { cout<<"no .gnome file. regenerating it"<<endl; return 0; }
+    
+    stringstream ss( readFileAsString(filename) );
+    string line;
+    for(;getline(ss, line, '\n');){
+        if(line[0]=='>') continue;
+        genome+=line;
+    }
     refGen_hash = new htab;
     fread(refGen_hash, sizeof(htab), 1, pfile); 
-    (*(refGen_hash->entries)) = new CODE_POS_PAIR[refGen_hash->size];
-    fread(*(refGen_hash->entries), sizeof(CODE_POS_PAIR), refGen_hash->size, pfile);
+    // restore call back functions
+    // refGen_hash = htab_create_alloc(1024, preshhash, element_eq, delete_element, calloc, free);
+    refGen_hash->hash_f = &preshhash;
+    refGen_hash->eq_f = &element_eq;
+    refGen_hash->del_f = &delete_element;
+    refGen_hash->alloc_f = &calloc;
+    refGen_hash->free_f = &free;
+    // reset counters
+    refGen_hash->searches = 0;
+    refGen_hash->collisions= 0;
+    // restore data
+    refGen_hash->entries = new void *[refGen_hash->size];
+    CODE_POS_PAIR* datablock = new CODE_POS_PAIR[refGen_hash->size];
+    fread(datablock, sizeof(CODE_POS_PAIR), refGen_hash->size, pfile);
+    cout<<"read in #"<<refGen_hash->size<<" entries"<<endl; 
+    for(int i=0; i<refGen_hash->size; i++) {
+        if(datablock[i].code==0) refGen_hash->entries[i] = 0;
+        else refGen_hash->entries[i] = &datablock[i];
+    }
     fclose(pfile);
+    cout<<"loading done"<<endl;
+    return refGen_hash->size;
+}
+
+/* for debugging purpose
+ * dump the whole hash table
+ */
+void htab_dump(htab_t htab){
+    cout<<"\ndump the hash table"<<endl;
+    printf("SIZE:%d\n", htab->size);
+    for(int i=0; i<htab->size; i++){
+        cout<<"entry#"<<i<<"\t";
+        CODE_POS_PAIR* pcode = (CODE_POS_PAIR*)htab->entries[i];
+        if(pcode==0) {cout<<"empty\n"; continue; }
+        cout<<bitset<32>(pcode->code)<<"\t"<<pcode->pos<<"\n";
+    }
 }
 
 int main(int argc, char* argv[]){
     if( argc<=2 ){ cout<<"program <ref_genome> <fastaq>"<<endl; return 0; }
 
     cout<<"current time in ms\t"<<(std::time(0))<<endl;
-    hashRefGenome(argv[1]);
+    int ret = load_genome( argv[1] );
+    if(ret==0) { 
+        hashRefGenome(argv[1]);
+        save_genome( (string(argv[1])+".genome").c_str() );
+    }
     cout<<"current time in ms\t"<<(std::time(0))<<endl;
-    // save the genome
-    save_genome( (string(argv[1])+".genome").c_str() );
 
     unsigned int baskets[20];
     CODE_TYPE codes[400];
@@ -252,8 +305,7 @@ int main(int argc, char* argv[]){
     unsigned int c_not_in_basket = 0;
     unsigned int c_hit_read = 0;
     unsigned int c_collisions = refGen_hash->collisions;
-    unsigned int max_count;
-    unsigned int max_count_b_i;
+    unsigned int max_count, max_count_b_i, second_max_count, second_max_count_b_i;
     string read_name="";
     for(;getline(ss, line, '\n');){
         if( ((lc)%4)==0 ) read_name=line;
@@ -264,10 +316,9 @@ int main(int argc, char* argv[]){
         encodeRead(line, codes, CODE_SIZE);
         CODE_POS_PAIR* p_codepos = new CODE_POS_PAIR;
         for(int i=0; i<line.size()&i<400; ){
-            p_codepos->code = codes[i];
             // stop on empty code, or 16 poly'A's, or 'N's, current sequencers can not make accurate call on plyA
             if( codes[i]==0 ) { i++; continue; }
-            //p_codepos->pos = i;
+            p_codepos->code = codes[i];
             CODE_POS_PAIR* val = (CODE_POS_PAIR*)htab_find(refGen_hash, p_codepos);
             if( val==0 ) {i++; continue; }// no genome hit, continue
             // other wise, put it into basket
@@ -279,27 +330,35 @@ int main(int argc, char* argv[]){
                     baskets[b_i*2]=pos;
                     baskets[b_i*2+1]++;
                     inserted = true;
-                    //cout<<"insert into bsk#"<<b_i<<"\t"<<baskets[b_i*2]<<":"<<baskets[b_i*2+1]<<"\tread line#"<<lc<<"\tcode#"<<i<<endl;
+                    cout<<"insert into bsk#"<<b_i<<"\t"<<baskets[b_i*2]<<":"<<baskets[b_i*2+1]<<"\tread line#"<<lc<<"\tcode#"<<i<<endl;
                     break;
                 }
             }
             if( inserted == false ) c_not_in_basket++;
-            i = (i/CODE_SIZE+1)*CODE_SIZE;
+            i = (i/CODE_SIZE+1)*CODE_SIZE; // if inserted, jump to next window
         }
-        max_count=0;
+        max_count=0; second_max_count = 0;
         for(int b_i=0; b_i<10; b_i++){
             if( baskets[2*b_i+1] > max_count ){
                 max_count = baskets[2*b_i+1];
                 max_count_b_i = b_i;
             }
+            if( baskets[2*b_i+1] < max_count && baskets[2*b_i+1] > second_max_count ){
+                second_max_count = baskets[2*b_i+1];
+                second_max_count_b_i = b_i;
+            }
             //cout<<"basket#"<<b_i<<"\tpos="<<baskets[b_i*2]<<"\tcount="<<baskets[b_i*2+1]<<"\tmax_hit bkt#="<<max_count_b_i<<" count= "<<max_count<<endl;
         }
-        if(max_count<6) continue;
         c_hit_read++;
         //print alignment
-        fout<<">READ ["<<read_name<<"] | hit offset ["<<baskets[2*max_count_b_i]<<"] | #hits="<<max_count<<"\n";
-        fout<<line<<"\n"<<genome.substr( baskets[2*max_count_b_i],line.size() )<<"\n";
-        
+        if(max_count>=4){ // 5*16=80bp, 1 mismatch in 100bp
+            fout<<">READ ["<<read_name<<"] | hit offset ["<<baskets[2*max_count_b_i]<<"] | #hits="<<max_count<<"\n";
+            fout<<line<<"\n"<<genome.substr( baskets[2*max_count_b_i],line.size() )<<"\n";
+        }
+        if(second_max_count>=4){ // 5*16=80bp, 1 mismatch in 100bp
+            fout<<">READ ["<<read_name<<"] | 2nd hit offset ["<<baskets[2*second_max_count_b_i]<<"] | #hits="<<second_max_count<<"\n";
+            fout<<line<<"\n"<<genome.substr( baskets[2*second_max_count_b_i],line.size() )<<"\n";
+        }
     }
 
     cout<<"current time in ms\t"<<std::time(0)<<endl;
