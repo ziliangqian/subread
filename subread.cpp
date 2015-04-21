@@ -360,6 +360,72 @@ void htab_dump(htab_t htab){
     }
 }
 
+/**
+ * also encode vcf file into coding system for quick look ups
+ */
+struct SNP_ENTRY{
+    unsigned int rsid = 0x0; // rsid in dbSNP
+    unsigned int pos = 0x0; //genomic position
+    unsigned char shift = 0x0; // coding frame
+};
+int encode_common_variation(string vcf_filename){
+    char buffer[2000];
+    FILE* pFile = fopen(vcf_filename.c_str(), "r");
+    unsigned int c_large_ins = 0;
+    unsigned int c_failure= 0;
+    unsigned int lc = 0;
+    vector<SNP_ENTRY> snp_entries;
+    for(;fgets(buffer,2000,pFile);){
+        if(buffer[0]=='#') continue;
+        string line(buffer);
+        unsigned int sep1 = line.find('\t');
+        unsigned int sep2 = line.find('\t', sep1+1);
+        unsigned int sep3 = line.find('\t', sep2+1);
+        unsigned int sep4 = line.find('\t', sep3+1);
+        unsigned int sep5 = line.find('\t', sep4+1);
+        string chr = line.substr(0, sep1);
+        unsigned int pos = std::stoi(line.substr(sep1+1, sep2-sep1));
+        string rsid = line.substr(sep2+1, sep3-sep2);
+        string ref = line.substr(sep3+1, sep4-sep3);
+        string alt = line.substr(sep4+1, sep5-sep4);
+        // try different coding frame to identify a unique codes
+        bool inserted = false;
+        for(int i=1; i<CODE_SIZE-alt.size(); i++){
+            CODE_POS_PAIR* snp = new CODE_POS_PAIR;
+            snp->code = encodeSubread( (genome.substr(pos-i, i)+alt+genome.substr(pos+ref.size(),CODE_SIZE-i-alt.size())).c_str() );
+            snp->pos = 0xd0000000 + snp_entries.size(); // addr. space: 0xd0000000 - 0xfca0000000
+            CODE_POS_PAIR* val = (CODE_POS_PAIR*) htab_find(refGen_hash, snp);
+            if(val==0){
+                CODE_POS_PAIR** entry = (CODE_POS_PAIR**) htab_find_slot(refGen_hash, snp, INSERT);
+                *entry = snp;
+                inserted=true;
+                SNP_ENTRY* snp_entry = new SNP_ENTRY;
+                snp_entry->rsid = std::stoi( rsid.substr(2,rsid.size()-2) );
+                snp_entry->pos = pos;
+                snp_entry->shift = (unsigned char)i;
+                snp_entries.push_back(*snp_entry);
+                break;
+            }
+        }
+        //insertion large than CODE_SIZE, ignore
+        if(alt.size()-1>CODE_SIZE){ c_large_ins++; }
+        if(inserted == false) {c_failure++;}
+        //too many SNPs? ignore the resting ones, or raise complains
+        if( lc+0xd0000000 > 0xfca0000000 ) {throw lc; break;}
+    }
+    fclose(pFile);
+
+    // save the snp codes into flat binary file
+    FILE* poutfile = fopen( (string(vcf_filename)+".snp").c_str(), "wb" );
+    unsigned int len = snp_entries.size();
+    fwrite( &len, sizeof(len), 1, poutfile);
+    for(int i=0; i<snp_entries.size(); i++)
+        fwrite( &snp_entries[i], sizeof(SNP_ENTRY), 1, poutfile);
+    fclose(poutfile);
+
+    return 0;
+}
+
 inline bool insert_basket(unsigned int* baskets, unsigned int pos){
     bool inserted = false;
     for(int b_i=0; b_i<10; b_i++){
@@ -394,6 +460,8 @@ int main(int argc, char* argv[]){
     // read in the fastq file
     //stringstream is( readFileAsString(argv[2]) );
     ifstream is( argv[2] );
+    FILE* p_input_file = fopen(argv[2], "r");
+    char buffer[20000];
     ofstream fout((string(argv[2])+".subread").c_str());
     string line;
     unsigned int lc=0;
@@ -402,7 +470,8 @@ int main(int argc, char* argv[]){
     unsigned int c_collisions = refGen_hash->collisions;
     unsigned int max_count, max_count_b_i, second_max_count, second_max_count_b_i;
     string read_name="";
-    for(;getline(is, line, '\n');){
+    for(;fgets(buffer, 1999, p_input_file)!=NULL;){
+        line = string(buffer);
         if( ((lc)%4)==0 ) read_name=line;
         if( ((++lc)%4)!=2 ) continue;
         if( line.size()>380 ) { cerr<<"WARN: read too long! take firt 384 bps"<<endl; line=line.substr(0,384); }
@@ -462,5 +531,6 @@ int main(int argc, char* argv[]){
     cout<<"done with hits:"<<c_hit_read<<endl;
     cout<<"hashtable collisions "<<refGen_hash->collisions-c_collisions;
     fout.close();
+    fclose(p_input_file);
 }
 
