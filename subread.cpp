@@ -3,9 +3,12 @@
 #include <iostream>
 #include <string>
 #include <bitset>
+#include <vector>
 #include <ctime>
+#include <ext/hash_map>
 
 using namespace std;
+using namespace __gnu_cxx;
 
 #define CODE_SIZE 16
 typedef unsigned int CODE_TYPE; // 32 bit int for a code, == 16 bp nucleotide
@@ -86,14 +89,30 @@ void encodeRead(string& read, CODE_TYPE (&codes)[400], int gap_size){
     b -= c; b -= a; b = (b ^ (a<<10)) & 0xffffffff; \
     c -= a; c -= b; c = (c ^ (b>>15)) & 0xffffffff; \
 }
+/* positions
+ * 0xfca00000-0xffffffff, reserved for marking genomic repeating 16bp codes, up to 56,623,104 repeats(25% of codes are repeat)
+ * ***********0xfca00001, repeated, lookup info in genomic_repeats[0]
+ * ***********0xfca00002, repeated, lookup info in genomic_repeats[1]
+ * 0xd0000000-0xfca00000, reserved for common variations in human genome, up to 748,683,008 snps
+ * 0x00000001-0xd0000000, reserved for human genome positions, up to 3,489,660,927 genomic positions
+ * 0x00000000, invalid position
+ *
+ * code = 0x00000000, invalid code, polyA was skept in current version
+ */
 struct CODE_POS_PAIR{
     CODE_TYPE code;
-    unsigned int pos;
+    unsigned int pos; /*0xffffff00-0xffffffff, repeat # 01-ff*/
     inline bool operator ==(const CODE_POS_PAIR& right){return this->code==right.code;}
     inline bool operator !=(const CODE_POS_PAIR& right){return this->code!=right.code;}
     inline bool operator ==(const unsigned int& right){return this->code==right;}
     inline bool operator !=(const unsigned int& right){return this->code!=right;}
     inline unsigned int operator %(const unsigned int& right){return this->code%right;}
+};
+struct DUP_POS{
+    unsigned int size = 0;
+    unsigned int* entries = 0;
+    public:
+    void dump(ostream& out){ cout<<"\nDUMP DUP_POS"<<endl; for(int i=0; i<size; i++){ out<<i<<"\t"<<entries[i]<<"\n"; } }
 };
 inline int element_eq(const void * p1, const void * p2){
     return ((CODE_POS_PAIR*)p1)->code==((CODE_POS_PAIR*)p2)->code;
@@ -148,6 +167,7 @@ inline unsigned int myhash(const void* elem){
     return (pcode->code>>4)+((pcode->code&0x4)<<24);
 }
 htab_t refGen_hash, refGen_hash_tier2;
+DUP_POS genome_duplicates;
 string genome;
 string readFileAsString(string filename){
     FILE* pfile = fopen(filename.c_str(), "rb");
@@ -167,24 +187,18 @@ void hashRefGenome(string filename){
         genome+=line;
     }
     refGen_hash = htab_create_alloc(1024, preshhash, element_eq, delete_element, calloc, free);
-    refGen_hash_tier2 = htab_create_alloc(1024, wonghash, element_eq, delete_element, calloc, free);
-
+    hash_map<CODE_TYPE, vector<unsigned int> > duplicates;
     unsigned int count_total_hit = 0;
     unsigned int count_multiple_hit = 0;
     unsigned int count_collisions = 0;
     unsigned int count_2nd_hit = 0;
     CODE_TYPE code = 0;
-    for(unsigned int i=0; i<genome.size()-16; i+=CODE_SIZE){
+    for(unsigned int i=0; i<genome.size()-16; i+=CODE_SIZE/4){
         CODE_POS_PAIR* p_codepos = new CODE_POS_PAIR;
         p_codepos->code = encodeSubread(genome.substr(i, 16).c_str());
         p_codepos->pos = i;
         CODE_POS_PAIR* val = (CODE_POS_PAIR*)htab_find(refGen_hash, p_codepos);
         
-        if(val==0) val = (CODE_POS_PAIR*)htab_find(refGen_hash_tier2, p_codepos);
-        else{
-            CODE_POS_PAIR** addr = (CODE_POS_PAIR**) htab_find_slot(refGen_hash_tier2, p_codepos, INSERT);
-            (*addr) = p_codepos;
-        }
         if(val==0){
             count_collisions = refGen_hash->collisions;
             CODE_POS_PAIR** addr = (CODE_POS_PAIR**) htab_find_slot(refGen_hash, p_codepos, INSERT);
@@ -192,31 +206,78 @@ void hashRefGenome(string filename){
             (*addr) = p_codepos;
             if(count_collisions>=5) count_2nd_hit++;
             count_total_hit++;
-        }else count_multiple_hit++;
-
-        //RC
-        p_codepos = new CODE_POS_PAIR;
-        p_codepos->code = rc(p_codepos->code);
-        p_codepos->pos = i;
-        val = (CODE_POS_PAIR*)htab_find(refGen_hash, p_codepos);
-        
-        if(val==0) val = (CODE_POS_PAIR*)htab_find(refGen_hash_tier2, p_codepos);
-        else{
-            CODE_POS_PAIR** addr = (CODE_POS_PAIR**) htab_find_slot(refGen_hash_tier2, p_codepos, INSERT);
-            (*addr) = p_codepos;
+        }else {
+            count_multiple_hit++;
+            if(duplicates.count( val->code )==0){ 
+                duplicates.insert(make_pair<CODE_TYPE, vector<unsigned int> >(val->code, vector<unsigned int>())); 
+                duplicates[val->code].push_back(val->pos);
+            }
+            duplicates[val->code].push_back(i);
         }
-        if(val==0){
-            count_collisions = refGen_hash->collisions;
-            CODE_POS_PAIR** addr = (CODE_POS_PAIR**) htab_find_slot(refGen_hash, p_codepos, INSERT);
-            count_collisions = refGen_hash->collisions-count_collisions;
-            (*addr) = p_codepos;
-            if(count_collisions>=5) count_2nd_hit++;
-            count_total_hit++;
-        }else count_multiple_hit++;
-
+        // TODO, encoding reverse-complement
     }
+    // to know where is the entry for a code
     cout<<"TOTAL:"<<count_total_hit<<"\tMULTI:"<<count_multiple_hit<<"\tTODO:"<<count_2nd_hit<<"\t";
+    /*
+     * code1_pos1|code1_pos2|0x00000000|code2_pos1|code2_pos2|...
+     */
+    hash_map<CODE_TYPE, unsigned int> dup_code_4_postion;
+    genome_duplicates.size = duplicates.size()+count_multiple_hit*2;
+    unsigned int* dup_pos = new unsigned int[genome_duplicates.size];
+    memset(dup_pos, 0, sizeof(unsigned int)*genome_duplicates.size );
+    unsigned int idx=0;
+    for(hash_map<CODE_TYPE, vector<unsigned int> >::iterator ite = duplicates.begin(); ite!=duplicates.end(); ite++){
+        dup_code_4_postion.insert(make_pair<CODE_TYPE, unsigned int>(ite->first, idx));
+        for(int i=0; i<ite->second.size(); i++){
+            dup_pos[idx]=ite->second[i];
+            idx++;
+        }
+        dup_pos[idx++]=0;//0x00000000 seperator
+    }
+    genome_duplicates.entries = dup_pos;
+    duplicates.clear();
+    // point CODE_POS pair to DUP_POS
+    for(int i=0; i<refGen_hash->size; i++){
+        CODE_POS_PAIR* entry = (CODE_POS_PAIR*)refGen_hash->entries[i];
+        if(entry==0) continue;
+        CODE_TYPE code = entry->code;
+        if( dup_code_4_postion.count(code) ) {
+            entry->pos = dup_code_4_postion[code]+0xfca00001;
+        }
+    }
 }
+int make_codes_stat_4_genome(string filename){
+    stringstream ss( readFileAsString(filename) );
+    string line;
+    for(;getline(ss, line, '\n');){
+        if(line[0]=='>') continue;
+        genome+=line;
+    }
+    htab_t stat_hash = htab_create_alloc(1024, preshhash, element_eq, delete_element, calloc, free);
+    CODE_TYPE code = 0;
+    for(unsigned int i=0; i<genome.size()-16; i+=CODE_SIZE){
+        CODE_POS_PAIR* p_codepos = new CODE_POS_PAIR;
+        p_codepos->code = encodeSubread(genome.substr(i, 16).c_str());
+        p_codepos->pos = 1;
+        CODE_POS_PAIR* val = (CODE_POS_PAIR*)htab_find(stat_hash, p_codepos);
+        if(val==0){
+            CODE_POS_PAIR** addr = (CODE_POS_PAIR**) htab_find_slot(stat_hash, p_codepos, INSERT);
+            (*addr) = p_codepos;
+        }else{
+            val->pos++;
+        }
+    } 
+    ofstream fout( (string(filename)+".kmerstat").c_str() );
+    fout<<"code\tpos\n";
+    for(int i=0; i<stat_hash->size; i++){
+        CODE_POS_PAIR* val = (CODE_POS_PAIR*)stat_hash->entries[i];
+        if(val==0) continue;
+        fout<<val->code<<"\t"<<val->pos<<"\n";
+    }
+    fout.close();
+    return 0;
+}
+
 int save_genome(const char* filename){
     FILE *pfile = fopen(filename, "wb");
     fwrite(refGen_hash, sizeof(htab), 1, pfile); 
@@ -229,6 +290,11 @@ int save_genome(const char* filename){
         }
         fwrite( pdata_entry, sizeof(CODE_POS_PAIR), 1, pfile );
     }
+    fclose(pfile);
+
+    pfile = fopen( (string(filename)+".dup").c_str(), "wb" );
+    fwrite( &genome_duplicates, sizeof(DUP_POS), 1, pfile);
+    fwrite( genome_duplicates.entries, sizeof(unsigned int)*genome_duplicates.size, 1, pfile);
     fclose(pfile);
     return 0;
 }
@@ -266,6 +332,15 @@ unsigned int load_genome(const char* filename){
         else refGen_hash->entries[i] = &datablock[i];
     }
     fclose(pfile);
+
+    // loading dup file if existed
+    pfile = fopen( ((string(filename)+".genome.dup").c_str()), "rb");
+    if(pfile==0) { cout<<"no .dup file. continue without dup file "<<endl; return 1; }
+    fread(&genome_duplicates, sizeof(DUP_POS), 1, pfile);
+    cout<<"read in "<<genome_duplicates.size<<" dups"<<endl;
+    genome_duplicates.entries = new unsigned int[genome_duplicates.size];
+    fread(genome_duplicates.entries, genome_duplicates.size * sizeof(unsigned int), 1, pfile);
+    
     cout<<"loading done"<<endl;
     return refGen_hash->size;
 }
@@ -280,12 +355,29 @@ void htab_dump(htab_t htab){
         cout<<"entry#"<<i<<"\t";
         CODE_POS_PAIR* pcode = (CODE_POS_PAIR*)htab->entries[i];
         if(pcode==0) {cout<<"empty\n"; continue; }
-        cout<<bitset<32>(pcode->code)<<"\t"<<pcode->pos<<"\n";
+        cout<<bitset<32>(pcode->code)<<"\t"<<decodeSubread(pcode->code)<<"\t"<<
+            pcode->pos<<"\t"<<(pcode->pos<=0xfca00000?' ':(pcode->pos-0xfca00001))<<"\n";
     }
 }
 
+inline bool insert_basket(unsigned int* baskets, unsigned int pos){
+    bool inserted = false;
+    for(int b_i=0; b_i<10; b_i++){
+        if( baskets[b_i*2]==0 
+                || baskets[b_i*2]==pos ){
+             baskets[b_i*2]=pos;
+             baskets[b_i*2+1]++;
+             inserted = true;
+             //cout<<"insert into bsk#"<<b_i<<"\t"<<baskets[b_i*2]<<":"<<baskets[b_i*2+1]<<"\tread line#"<<lc<<"\tcode#"<<i<<endl;
+             break;
+        }
+     }
+    return inserted;
+}
 int main(int argc, char* argv[]){
     if( argc<=2 ){ cout<<"program <ref_genome> <fastaq>"<<endl; return 0; }
+
+   // make_codes_stat_4_genome(argv[1]); return 0;
 
     cout<<"current time in ms\t"<<(std::time(0))<<endl;
     int ret = load_genome( argv[1] );
@@ -294,11 +386,14 @@ int main(int argc, char* argv[]){
         save_genome( (string(argv[1])+".genome").c_str() );
     }
     cout<<"current time in ms\t"<<(std::time(0))<<endl;
+    //genome_duplicates.dump(cout);
+    //htab_dump(refGen_hash);
 
     unsigned int baskets[20];
     CODE_TYPE codes[400];
     // read in the fastq file
-    stringstream ss( readFileAsString(argv[2]) );
+    //stringstream is( readFileAsString(argv[2]) );
+    ifstream is( argv[2] );
     ofstream fout((string(argv[2])+".subread").c_str());
     string line;
     unsigned int lc=0;
@@ -307,7 +402,7 @@ int main(int argc, char* argv[]){
     unsigned int c_collisions = refGen_hash->collisions;
     unsigned int max_count, max_count_b_i, second_max_count, second_max_count_b_i;
     string read_name="";
-    for(;getline(ss, line, '\n');){
+    for(;getline(is, line, '\n');){
         if( ((lc)%4)==0 ) read_name=line;
         if( ((++lc)%4)!=2 ) continue;
         if( line.size()>380 ) { cerr<<"WARN: read too long! take firt 384 bps"<<endl; line=line.substr(0,384); }
@@ -322,17 +417,19 @@ int main(int argc, char* argv[]){
             CODE_POS_PAIR* val = (CODE_POS_PAIR*)htab_find(refGen_hash, p_codepos);
             if( val==0 ) {i++; continue; }// no genome hit, continue
             // other wise, put it into basket
-            unsigned int pos = val->pos-i;
+            unsigned int pos = val->pos<i?0:val->pos-i;// sometimes, query is longer than genome itself
             bool inserted = false;
-            for(int b_i=0; b_i<10; b_i++){
-                if( baskets[b_i*2]==0 
-                        || baskets[b_i*2]==pos ){
-                    baskets[b_i*2]=pos;
-                    baskets[b_i*2+1]++;
-                    inserted = true;
-                    cout<<"insert into bsk#"<<b_i<<"\t"<<baskets[b_i*2]<<":"<<baskets[b_i*2+1]<<"\tread line#"<<lc<<"\tcode#"<<i<<endl;
-                    break;
+            if(val->pos > 0xfca00001){ // run into non-unique code with multiple genomic hits
+                for(unsigned int pos_i=val->pos-0xfca00001;;pos_i++){
+                    pos = genome_duplicates.entries[pos_i];
+                    if(pos==0) break;
+                    //cout<<"debug: insert from multiple entry info "<<pos<<"\t"<<decodeSubread(val->code)<<"\t"<<genome.substr(pos,16)<<"\n";
+                    inserted = insert_basket(baskets, pos<i?0:pos-i); // sometimes, query is longer than genome itself
                 }
+                //cout<<"hit multiple entries"<<endl;
+            }else{
+                //cout<<"debug: unique entry info "<<pos<<"\t"<<decodeSubread(val->code)<<"\t"<<genome.substr(pos,16)<<"\n";
+                inserted = insert_basket(baskets, pos);
             }
             if( inserted == false ) c_not_in_basket++;
             i = (i/CODE_SIZE+1)*CODE_SIZE; // if inserted, jump to next window
