@@ -378,8 +378,34 @@ void dump_snps(ostream& out){
             <<genome.substr(snp_entries[i].pos-(unsigned int)snp_entries[i].shift, 16)<<"\n";
     }
 }
+int load_snps(string filename){
+    FILE* pFile = fopen( filename.c_str(), "rb" );
+    if(pFIle==NULL) return 0;
+    unsigned int len = 0;
+    fread(&len, sizeof(unsigned int), 1, pFile);
+    snp_entries = new SNP_ENTRY[len];
+    fread(snp_entries, sizeof(SNP_ENTRY), len, pFile);
+    for(int i=0; i<len; i++){
+        SNP_ENTRY snp = snp_entries[i];
+        CODE_POS_PAIR* snp_code = new CODE_POS_PAIR;
+        snp_code->code = snp->code;
+        snp_code->pos = i+0xd0000000;
+        CODE_POS_PAIR* val = htab_find(refGen_hash, snp_code);
+        if(val!=null) { 
+            cout<<"snp hit the genome, rebuild the whole SNP stack"<<endl;
+            delete snp_entries; // release memory
+            fclose(pFile);// close file
+            return 0; 
+        }
+        CODE_POS_PAIR **entry = htab_find_slot(refGen_hash, snp_code, INSERT);
+        *entry = snp_code;
+    }
+    fclose(pFile);
+    return 1;
+}
 int encode_common_variation(string vcf_filename){
     char buffer[2000];
+    if( load_snps(vcf_filename+".snp") ) return 1; // if snp already encoded
     FILE* pFile = fopen(vcf_filename.c_str(), "r");
     unsigned int c_large_ins = 0;
     unsigned int c_failure= 0;
@@ -517,7 +543,7 @@ int main(int argc, char* argv[]){
                 pos = snp_entries[idx].pos-snp_entries[idx].shift;
                 if(snp_entries[idx].pos>snp_entries[idx].shift) 
                     inserted = insert_basket(baskets, pos);
-                snp_hits[idx]++;
+                snp_hits[idx]++; // be careful of random hits! issue #1 in github
             }else{
                 //cout<<"debug: unique entry info "<<pos<<"\t"<<decodeSubread(val->code)<<"\t"<<genome.substr(pos,16)<<"\n";
                 inserted = insert_basket(baskets, pos);
