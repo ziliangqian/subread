@@ -6,6 +6,7 @@
 #include <vector>
 #include <ctime>
 #include <ext/hash_map>
+//#include <unordered_map>
 
 using namespace std;
 using namespace __gnu_cxx;
@@ -109,9 +110,10 @@ struct CODE_POS_PAIR{
     inline unsigned int operator %(const unsigned int& right){return this->code%right;}
 };
 struct DUP_POS{
-    unsigned int size = 0;
-    unsigned int* entries = 0;
+    unsigned int size;
+    unsigned int* entries;
     public:
+    DUP_POS(){size=0; entries=0; }
     void dump(ostream& out){ cout<<"\nDUMP DUP_POS"<<endl; for(int i=0; i<size; i++){ out<<i<<"\t"<<entries[i]<<"\n"; } }
 };
 inline int element_eq(const void * p1, const void * p2){
@@ -350,7 +352,7 @@ unsigned int load_genome(const char* filename){
  */
 void htab_dump(htab_t htab){
     cout<<"\ndump the hash table"<<endl;
-    printf("SIZE:%d\n", htab->size);
+    printf("SIZE:%lu\n", htab->size);
     for(int i=0; i<htab->size; i++){
         cout<<"entry#"<<i<<"\t";
         CODE_POS_PAIR* pcode = (CODE_POS_PAIR*)htab->entries[i];
@@ -364,10 +366,11 @@ void htab_dump(htab_t htab){
  * also encode vcf file into coding system for quick look ups
  */
 struct SNP_ENTRY{
-    unsigned int rsid = 0x0; // rsid in dbSNP
-    CODE_TYPE code= 0x0; // rsid in dbSNP
-    unsigned int pos = 0x0; //genomic position
-    unsigned char shift = 0x0; // coding frame
+    unsigned int rsid; // rsid in dbSNP
+    CODE_TYPE code; // rsid in dbSNP
+    unsigned int pos; //genomic position
+    unsigned char shift; // coding frame
+    SNP_ENTRY(){rsid=0; code=0; pos=0; shift=0;}
 };
 vector<SNP_ENTRY> snp_entries;
 void dump_snps(ostream& out){
@@ -380,27 +383,29 @@ void dump_snps(ostream& out){
 }
 int load_snps(string filename){
     FILE* pFile = fopen( filename.c_str(), "rb" );
-    if(pFIle==NULL) return 0;
+    if(pFile==NULL) return 0;
     unsigned int len = 0;
     fread(&len, sizeof(unsigned int), 1, pFile);
-    snp_entries = new SNP_ENTRY[len];
-    fread(snp_entries, sizeof(SNP_ENTRY), len, pFile);
+    SNP_ENTRY* p_snp_entries = new SNP_ENTRY[len];
+    fread(p_snp_entries, sizeof(SNP_ENTRY), len, pFile);
     for(int i=0; i<len; i++){
-        SNP_ENTRY snp = snp_entries[i];
+        SNP_ENTRY snp = p_snp_entries[i];
+        snp_entries.push_back(snp);
         CODE_POS_PAIR* snp_code = new CODE_POS_PAIR;
-        snp_code->code = snp->code;
+        snp_code->code = snp.code;
         snp_code->pos = i+0xd0000000;
-        CODE_POS_PAIR* val = htab_find(refGen_hash, snp_code);
-        if(val!=null) { 
+        CODE_POS_PAIR* val = (CODE_POS_PAIR*)htab_find(refGen_hash, snp_code);
+        if(val!=NULL) { 
             cout<<"snp hit the genome, rebuild the whole SNP stack"<<endl;
-            delete snp_entries; // release memory
+            delete p_snp_entries; // release memory
             fclose(pFile);// close file
             return 0; 
         }
-        CODE_POS_PAIR **entry = htab_find_slot(refGen_hash, snp_code, INSERT);
+        CODE_POS_PAIR **entry = (CODE_POS_PAIR**)htab_find_slot(refGen_hash, snp_code, INSERT);
         *entry = snp_code;
     }
     fclose(pFile);
+    delete p_snp_entries; // release memory
     return 1;
 }
 int encode_common_variation(string vcf_filename){
@@ -418,11 +423,12 @@ int encode_common_variation(string vcf_filename){
         unsigned int sep3 = line.find('\t', sep2+1);
         unsigned int sep4 = line.find('\t', sep3+1);
         unsigned int sep5 = line.find('\t', sep4+1);
-        string chr = line.substr(0, sep1);
+        const string& chr = line.substr(0, sep1);
         unsigned int pos = std::stoi(line.substr(sep1+1, sep2-sep1));
-        string rsid = line.substr(sep2+1, sep3-sep2);
-        string ref = line.substr(sep3+1, sep4-sep3-1);
-        string alt = line.substr(sep4+1, sep5-sep4-1);
+        const string& rsid = line.substr(sep2+1, sep3-sep2);
+        const string& ref = line.substr(sep3+1, sep4-sep3-1);
+        const string& alt = line.substr(sep4+1, sep5-sep4-1);
+        if( (lc++)%100000==0 ) {cout<<lc<<endl;}
         //insertion large than CODE_SIZE, ignore
         if(alt.size()-1>CODE_SIZE){ c_large_ins++; continue; }
         bool inserted = false;
@@ -449,7 +455,7 @@ int encode_common_variation(string vcf_filename){
         }
         if(inserted == false) {c_failure++;}
         //too many SNPs? ignore the resting ones, or raise complains
-        if( lc+0xd0000000 > 0xfca0000000 ) {throw lc; break;}
+        if( (lc+0xd0000000) > 0xfca0000000 ) {throw lc; break;}
     }
     fclose(pFile);
 
@@ -463,7 +469,30 @@ int encode_common_variation(string vcf_filename){
 
     return 0;
 }
-
+class BASKETS{
+    unsigned int max_capacity; // 200 entry to max
+    unsigned int size; //current size
+    CODE_POS_PAIR codes[200];
+    public:
+    BASKETS(){max_capacity=200; size=0; }
+    inline void insert(CODE_POS_PAIR& pair){ if(size<max_capacity) codes[size++] = pair; }
+    inline void reset(){ std:memset(codes,0,sizeof(CODE_POS_PAIR)*200); size=0;  }
+    inline unsigned int search_pos(unsigned int pos, unsigned short* snp_hits){
+        unsigned int c_hit=0;
+        for(int i=0; i<size; i++){
+            if(codes[i].pos == pos) c_hit++;
+            snp_hits[codes[i].pos-0xd0000000]++;
+        }
+        return c_hit;
+    }
+    inline unsigned int search_code(CODE_TYPE code){
+        unsigned int c_hit=0;
+        for(int i=0; i<size; i++){
+            if(codes[i].code == code) c_hit++;
+        }
+        return c_hit;
+    }
+};
 inline bool insert_basket(unsigned int* baskets, unsigned int pos){
     bool inserted = false;
     for(int b_i=0; b_i<10; b_i++){
@@ -489,7 +518,7 @@ int main(int argc, char* argv[]){
         hashRefGenome(argv[1]);
         save_genome( (string(argv[1])+".genome").c_str() );
     }
-    int ret = encode_common_variation(argv[3]); // build snp information
+    ret = encode_common_variation(argv[3]); // build snp information
     if(ret==0) save_genome( (string(argv[1])+".genome").c_str() );
 
     cout<<"current time in ms\t"<<(std::time(0))<<endl;
@@ -513,6 +542,7 @@ int main(int argc, char* argv[]){
     unsigned short* snp_hits = new unsigned short[snp_entries.size()];
     std::memset(snp_hits, 0, snp_entries.size()*sizeof(unsigned short));
     string read_name="";
+    BASKETS snp_baskets;
     for(;fgets(buffer, 1999, p_input_file)!=NULL;){
         line = string(buffer);
         if( ((lc)%4)==0 ) read_name=line;
@@ -520,6 +550,7 @@ int main(int argc, char* argv[]){
         if( line.size()>380 ) { cerr<<"WARN: read too long! take firt 384 bps"<<endl; line=line.substr(0,384); }
         std::memset(&baskets, 0, 20*sizeof(unsigned int));
         std::memset(&codes, 0, 400*sizeof(unsigned int));
+        snp_baskets.reset();
         encodeRead(line, codes, CODE_SIZE);
         CODE_POS_PAIR* p_codepos = new CODE_POS_PAIR;
         for(int i=0; i<line.size()&i<400; ){
@@ -544,7 +575,7 @@ int main(int argc, char* argv[]){
                 pos = snp_entries[idx].pos-snp_entries[idx].shift;
                 if(snp_entries[idx].pos>snp_entries[idx].shift) 
                     inserted = insert_basket(baskets, pos);
-                snp_hits[idx]++; // be careful of random hits! issue #1 in github
+                snp_baskets.insert(*val);
             }else{
                 //cout<<"debug: unique entry info "<<pos<<"\t"<<decodeSubread(val->code)<<"\t"<<genome.substr(pos,16)<<"\n";
                 inserted = insert_basket(baskets, pos);
@@ -569,6 +600,8 @@ int main(int argc, char* argv[]){
         if(max_count>=4){ // 5*16=80bp, 1 mismatch in 100bp
             fout<<">READ ["<<read_name<<"] | hit offset ["<<baskets[2*max_count_b_i]<<"] | #hits="<<max_count<<"\n";
             fout<<line<<"\n"<<genome.substr( baskets[2*max_count_b_i],line.size() )<<"\n";
+            // search for snp hits
+            int ret = snp_baskets.search_pos(baskets[2*max_count_b_i], snp_hits);
         }
         if(second_max_count>=4){ // 5*16=80bp, 1 mismatch in 100bp
             fout<<">READ ["<<read_name<<"] | 2nd hit offset ["<<baskets[2*second_max_count_b_i]<<"] | #hits="<<second_max_count<<"\n";
@@ -581,5 +614,6 @@ int main(int argc, char* argv[]){
     cout<<"hashtable collisions "<<refGen_hash->collisions-c_collisions<<endl;
     fout.close();
     fclose(p_input_file);
+
 }
 
