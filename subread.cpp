@@ -193,7 +193,7 @@ void hashRefGenome(string filename){
     unsigned int count_collisions = 0;
     unsigned int count_2nd_hit = 0;
     CODE_TYPE code = 0;
-    for(unsigned int i=0; i<genome.size()-16; i+=CODE_SIZE/4){
+    for(unsigned int i=0; i<genome.size()-16; i+=CODE_SIZE/16){
         CODE_POS_PAIR* p_codepos = new CODE_POS_PAIR;
         p_codepos->code = encodeSubread(genome.substr(i, 16).c_str());
         p_codepos->pos = i;
@@ -365,16 +365,25 @@ void htab_dump(htab_t htab){
  */
 struct SNP_ENTRY{
     unsigned int rsid = 0x0; // rsid in dbSNP
+    CODE_TYPE code= 0x0; // rsid in dbSNP
     unsigned int pos = 0x0; //genomic position
     unsigned char shift = 0x0; // coding frame
 };
+vector<SNP_ENTRY> snp_entries;
+void dump_snps(ostream& out){
+    out<<"SNP DB SIZE = "<<snp_entries.size()<<endl;
+    for(int i=0; i<snp_entries.size(); i++){
+        out<<snp_entries[i].rsid<<"\t"<<decodeSubread(snp_entries[i].code)<<"\t"<<
+            snp_entries[i].pos<<"\tshift="<<(unsigned int)snp_entries[i].shift<<"\t"
+            <<genome.substr(snp_entries[i].pos-(unsigned int)snp_entries[i].shift, 16)<<"\n";
+    }
+}
 int encode_common_variation(string vcf_filename){
     char buffer[2000];
     FILE* pFile = fopen(vcf_filename.c_str(), "r");
     unsigned int c_large_ins = 0;
     unsigned int c_failure= 0;
     unsigned int lc = 0;
-    vector<SNP_ENTRY> snp_entries;
     for(;fgets(buffer,2000,pFile);){
         if(buffer[0]=='#') continue;
         string line(buffer);
@@ -386,13 +395,17 @@ int encode_common_variation(string vcf_filename){
         string chr = line.substr(0, sep1);
         unsigned int pos = std::stoi(line.substr(sep1+1, sep2-sep1));
         string rsid = line.substr(sep2+1, sep3-sep2);
-        string ref = line.substr(sep3+1, sep4-sep3);
-        string alt = line.substr(sep4+1, sep5-sep4);
-        // try different coding frame to identify a unique codes
+        string ref = line.substr(sep3+1, sep4-sep3-1);
+        string alt = line.substr(sep4+1, sep5-sep4-1);
+        //insertion large than CODE_SIZE, ignore
+        if(alt.size()-1>CODE_SIZE){ c_large_ins++; continue; }
         bool inserted = false;
-        for(int i=1; i<CODE_SIZE-alt.size(); i++){
+        // try different coding frame to identify a unique codes
+        for(int i=1; i<CODE_SIZE; i++){
             CODE_POS_PAIR* snp = new CODE_POS_PAIR;
-            snp->code = encodeSubread( (genome.substr(pos-i, i)+alt+genome.substr(pos+ref.size(),CODE_SIZE-i-alt.size())).c_str() );
+            snp->code = encodeSubread( (genome.substr(pos-i-1, i)
+                        +alt
+                        +genome.substr(pos+ref.size()-1,CODE_SIZE-i-alt.size()-1)).c_str() );
             snp->pos = 0xd0000000 + snp_entries.size(); // addr. space: 0xd0000000 - 0xfca0000000
             CODE_POS_PAIR* val = (CODE_POS_PAIR*) htab_find(refGen_hash, snp);
             if(val==0){
@@ -402,13 +415,12 @@ int encode_common_variation(string vcf_filename){
                 SNP_ENTRY* snp_entry = new SNP_ENTRY;
                 snp_entry->rsid = std::stoi( rsid.substr(2,rsid.size()-2) );
                 snp_entry->pos = pos;
+                snp_entry->code = snp->code;
                 snp_entry->shift = (unsigned char)i;
                 snp_entries.push_back(*snp_entry);
                 break;
             }
         }
-        //insertion large than CODE_SIZE, ignore
-        if(alt.size()-1>CODE_SIZE){ c_large_ins++; }
         if(inserted == false) {c_failure++;}
         //too many SNPs? ignore the resting ones, or raise complains
         if( lc+0xd0000000 > 0xfca0000000 ) {throw lc; break;}
@@ -443,7 +455,7 @@ inline bool insert_basket(unsigned int* baskets, unsigned int pos){
 int main(int argc, char* argv[]){
     if( argc<=2 ){ cout<<"program <ref_genome> <fastaq>"<<endl; return 0; }
 
-   // make_codes_stat_4_genome(argv[1]); return 0;
+    // make_codes_stat_4_genome(argv[1]); return 0;
 
     cout<<"current time in ms\t"<<(std::time(0))<<endl;
     int ret = load_genome( argv[1] );
@@ -451,6 +463,8 @@ int main(int argc, char* argv[]){
         hashRefGenome(argv[1]);
         save_genome( (string(argv[1])+".genome").c_str() );
     }
+    encode_common_variation(argv[3]); // build snp information
+
     cout<<"current time in ms\t"<<(std::time(0))<<endl;
     //genome_duplicates.dump(cout);
     //htab_dump(refGen_hash);
@@ -469,6 +483,8 @@ int main(int argc, char* argv[]){
     unsigned int c_hit_read = 0;
     unsigned int c_collisions = refGen_hash->collisions;
     unsigned int max_count, max_count_b_i, second_max_count, second_max_count_b_i;
+    unsigned short* snp_hits = new unsigned short[snp_entries.size()];
+    std::memset(snp_hits, 0, snp_entries.size()*sizeof(unsigned short));
     string read_name="";
     for(;fgets(buffer, 1999, p_input_file)!=NULL;){
         line = string(buffer);
@@ -496,6 +512,12 @@ int main(int argc, char* argv[]){
                     inserted = insert_basket(baskets, pos<i?0:pos-i); // sometimes, query is longer than genome itself
                 }
                 //cout<<"hit multiple entries"<<endl;
+            }else if(val->pos >= 0xd0000000){ // run into previous known variation
+                unsigned int idx = val->pos-0xd0000000;
+                pos = snp_entries[idx].pos-snp_entries[idx].shift;
+                if(snp_entries[idx].pos>snp_entries[idx].shift) 
+                    inserted = insert_basket(baskets, pos);
+                snp_hits[idx]++;
             }else{
                 //cout<<"debug: unique entry info "<<pos<<"\t"<<decodeSubread(val->code)<<"\t"<<genome.substr(pos,16)<<"\n";
                 inserted = insert_basket(baskets, pos);
@@ -529,7 +551,7 @@ int main(int argc, char* argv[]){
 
     cout<<"current time in ms\t"<<std::time(0)<<endl;
     cout<<"done with hits:"<<c_hit_read<<endl;
-    cout<<"hashtable collisions "<<refGen_hash->collisions-c_collisions;
+    cout<<"hashtable collisions "<<refGen_hash->collisions-c_collisions<<endl;
     fout.close();
     fclose(p_input_file);
 }
