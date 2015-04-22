@@ -489,7 +489,8 @@ int main(int argc, char* argv[]){
         hashRefGenome(argv[1]);
         save_genome( (string(argv[1])+".genome").c_str() );
     }
-    encode_common_variation(argv[3]); // build snp information
+    int ret = encode_common_variation(argv[3]); // build snp information
+    if(ret==0) save_genome( (string(argv[1])+".genome").c_str() );
 
     cout<<"current time in ms\t"<<(std::time(0))<<endl;
     //genome_duplicates.dump(cout);
