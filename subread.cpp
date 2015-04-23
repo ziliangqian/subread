@@ -404,6 +404,7 @@ int load_snps(string filename){
         CODE_POS_PAIR **entry = (CODE_POS_PAIR**)htab_find_slot(refGen_hash, snp_code, INSERT);
         *entry = snp_code;
     }
+    cout<<"load "<<len<<" snps"<<endl;
     fclose(pFile);
     delete p_snp_entries; // release memory
     return 1;
@@ -414,6 +415,7 @@ int encode_common_variation(string vcf_filename){
     FILE* pFile = fopen(vcf_filename.c_str(), "r");
     unsigned int c_large_ins = 0;
     unsigned int c_failure= 0;
+    unsigned int c_tries= 0;
     unsigned int lc = 0;
     for(;fgets(buffer,2000,pFile);){
         if(buffer[0]=='#') continue;
@@ -428,13 +430,14 @@ int encode_common_variation(string vcf_filename){
         const string& rsid = line.substr(sep2+1, sep3-sep2);
         const string& ref = line.substr(sep3+1, sep4-sep3-1);
         const string& alt = line.substr(sep4+1, sep5-sep4-1);
-        if( (lc++)%100000==0 ) {cout<<lc<<endl;}
+        //if( (lc++)%20000==0 ) {cout<<c_failure<<"/"<<lc<<"/"<<c_tries<<"\t"<<time(0)<<endl;}
         //insertion large than CODE_SIZE, ignore
         if(alt.size()-1>CODE_SIZE){ c_large_ins++; continue; }
         bool inserted = false;
         // try different coding frame to identify a unique codes
+        CODE_POS_PAIR* snp = new CODE_POS_PAIR;
         for(int i=1; i<CODE_SIZE; i++){
-            CODE_POS_PAIR* snp = new CODE_POS_PAIR;
+            c_tries++ ;
             snp->code = encodeSubread( (genome.substr(pos-i-1, i)
                         +alt
                         +genome.substr(pos+ref.size()-1,CODE_SIZE-i-alt.size()-1)).c_str() );
@@ -453,11 +456,20 @@ int encode_common_variation(string vcf_filename){
                 break;
             }
         }
-        if(inserted == false) {c_failure++;}
+        delete snp; //release memory if no insertion
+        if(inserted == false) {
+            c_failure++;
+            //cout<<"snp coding failure #"<<c_failure<<". "<<rsid<<endl;
+            /*the reason of failure, conflict with genome entry? or a existing SNP?
+             * it generates bunch of failures
+             */
+        }
         //too many SNPs? ignore the resting ones, or raise complains
         if( (lc+0xd0000000) > 0xfca0000000 ) {throw lc; break;}
     }
     fclose(pFile);
+
+    if(c_failure>0){ cout<<"Failure rate: "<<c_failure<<"/"<<lc<<endl; }
 
     // save the snp codes into flat binary file
     FILE* poutfile = fopen( (string(vcf_filename)+".snp").c_str(), "wb" );
@@ -493,6 +505,75 @@ class BASKETS{
         return c_hit;
     }
 };
+/* tag
+ * 0b01001010 : 01: substititution, 001: C, 010, G
+ * 0b10000001 : 10: deletion, 000001, 1 bp deleted
+ * 0b11------ : 11: insertion, the following bits record the length of insertion
+ */
+struct Variation{
+    unsigned char offset;
+    unsigned char tag;
+    public: Variation(){offset=0; tag=0;}
+};
+/* memory usage: 10B in total
+ */
+struct Alignment{
+    unsigned int pos; // alignment started from pos
+    Variation var[6]; // 6 variation for a read at most
+    Alignment(){pos=0;}
+    public: int add(Variation var){
+                unsigned inserted = 0;
+                for(int i=0; i<6; i++){
+                    if(var[i].tag==0) var[i]=var;
+                    inserted = 1;
+                }
+                return inserted;
+            }
+};
+/*extend the hits to get a full alignment, discover indel and snv at the same time*/
+inline unsigned int extend_hits(unsigned int pos1, unsigned int pos2, 
+        const string& read, unsigned int MAX_MISMATCH, Alignment& alignment){
+    // search start with smaller pos
+    unsigned int pos = pos1<pos2?pos1:pos2;
+    const string& context = genome.substr(pos, read.size());
+    unsigned int c_mismatch = 0;
+    unsigned int i=0;
+    for(i=0; i<read.size(); i++){
+        if(read[i]!=context[i]){
+            Variation var;
+            var.offset = i;
+            var.tag = 0b01000000+(NT_Code(context[i])<<3)+NT_Code(read[i]);
+            Alignment.add( var );
+            if( (++c_mismatch) >= MAX_MISMATCH) break; // stop searching when there are 3 mismatches
+        }
+    }
+    // get a match with no gap open, <=3 mismatches
+    if(i==read.size()) return c_mismatch;
+    // otherwise search the next hits, for potential gap opennings
+    unsigned int pos = pos1>pos2?pos1:pos2;
+    context = genome.substr(pos, read.size());
+    unsigned int j=read.size()-1;
+    for(;j>=0; j--){
+        if(read[j]!=context[j]){
+            Variation var;
+            var.offset = i;
+            var.tag = 0b01000000+(NT_Code(context[i])<<3)+NT_Code(read[i]);
+            Alignment.add( var );
+            if( (++c_mismatch) >= MAX_MISMATCH) break; // stop searching when there are 3 mismatches
+        }
+    }
+    Variation var;
+    var.offset = offset;
+    if(j>i) { // insertion
+        var.tag = 0b11000000+(j-i);
+        alignment.add(var);
+        return 0x20+c_mismatch; 
+    } else { // deletion
+        var.tag = 0b10000000+(pos2>pos1?(pos2-pos1):(pos1-pos2));
+        alignment.add(var);
+        return 0x10+c_mismatch; 
+    }
+}
 inline bool insert_basket(unsigned int* baskets, unsigned int pos){
     bool inserted = false;
     for(int b_i=0; b_i<10; b_i++){
@@ -576,6 +657,7 @@ int main(int argc, char* argv[]){
                 if(snp_entries[idx].pos>snp_entries[idx].shift) 
                     inserted = insert_basket(baskets, pos);
                 snp_baskets.insert(*val);
+                cout<<"hit snp entries: "<<snp_entries[idx].rsid<<"\t"<<pos<<endl;
             }else{
                 //cout<<"debug: unique entry info "<<pos<<"\t"<<decodeSubread(val->code)<<"\t"<<genome.substr(pos,16)<<"\n";
                 inserted = insert_basket(baskets, pos);
@@ -593,24 +675,49 @@ int main(int argc, char* argv[]){
                 second_max_count = baskets[2*b_i+1];
                 second_max_count_b_i = b_i;
             }
-            //cout<<"basket#"<<b_i<<"\tpos="<<baskets[b_i*2]<<"\tcount="<<baskets[b_i*2+1]<<"\tmax_hit bkt#="<<max_count_b_i<<" count= "<<max_count<<endl;
+            //cout<<"basket#"<<b_i<<"\tpos="<<baskets[b_i*2]<<"\tcount="<<baskets[b_i*2+1]<<endl;
         }
+        if(max_count<1) continue; // 5*16=80bp, 1 mismatch in 100bp
         c_hit_read++;
-        //print alignment
-        if(max_count>=4){ // 5*16=80bp, 1 mismatch in 100bp
-            fout<<">READ ["<<read_name<<"] | hit offset ["<<baskets[2*max_count_b_i]<<"] | #hits="<<max_count<<"\n";
-            fout<<line<<"\n"<<genome.substr( baskets[2*max_count_b_i],line.size() )<<"\n";
-            // search for snp hits
-            int ret = snp_baskets.search_pos(baskets[2*max_count_b_i], snp_hits);
-        }
+
+        //print top-hit alignment
+        fout<<">READ ["<<read_name<<"] | hit offset ["<<baskets[2*max_count_b_i]<<"] | #hits="<<max_count<<"\n";
+        fout<<line<<"\n"<<genome.substr( baskets[2*max_count_b_i],line.size() )<<"\n";
+        // search for snp hits
+        int ret = snp_baskets.search_pos(baskets[2*max_count_b_i], snp_hits);
+        
+        // print the second best match
         if(second_max_count>=4){ // 5*16=80bp, 1 mismatch in 100bp
             fout<<">READ ["<<read_name<<"] | 2nd hit offset ["<<baskets[2*second_max_count_b_i]<<"] | #hits="<<second_max_count<<"\n";
             fout<<line<<"\n"<<genome.substr( baskets[2*second_max_count_b_i],line.size() )<<"\n";
         }
-    }
 
-    cout<<"current time in ms\t"<<std::time(0)<<endl;
-    cout<<"done with hits:"<<c_hit_read<<endl;
+        /** generate alignment based on the info in basket
+         * 100bp for example
+         * 1st,    2nd      distance   scenorio   score
+         * 6 hits, <=1 hit:   .        PM          10
+         * 5 hits, <=1 hit:   .        SNV         10
+         * 4 hits, 2 hit:    <100bp    1 indel     6
+         * 4 hits, 1 hit:    <100bp    1 indel     5
+         * 3 hits, 3 hit:    <100bp    1 indel     6
+         * 3 hits, 2 hit:    <100bp    1 indel     5
+         * 3 hits, 1 hit:    <100bp    1 indel     4
+         * 2 hits, 2 hit:    >100bp    SV          4
+         * 4 hits, 3 hits:    .        repeats     3
+         * 5 hits, 4 hits:    .        repeats     3
+         * 5 hits, 3/2 hits:  .        ?           3
+         * 6 hits, 5 hits:    .        repeats     3
+         * 2 hits, 1 hits:    .        no hit      0
+         */
+        string& context = genome.substr();
+        // non-unique hits
+    }
+    unsigned int c_hit_snp=0;
+    for(int i=0; i<snp_entries.size(); i++){
+        if(snp_hits[i]>0) c_hit_snp++;
+    }
+    cout<<"current time in ms: "<<std::time(0)<<endl;
+    cout<<"done with hits:"<<c_hit_read<<". Potentially ("<<c_hit_snp<<" snps) discovered"<<endl;
     cout<<"hashtable collisions "<<refGen_hash->collisions-c_collisions<<endl;
     fout.close();
     fclose(p_input_file);
