@@ -519,6 +519,7 @@ struct Variation{
 /* memory usage: 10B in total for recording a read mapping to ref
  */
 struct ReadAlignment{
+    string read; // memory heavy field, TODO
     unsigned int pos; // the ReadAlignment could be ordered by pos
     unsigned char size; // alignment started from pos
     Variation var[6]; // 6 variation for a read at most
@@ -529,6 +530,9 @@ struct ReadAlignment{
                 return true;
             }
 };
+bool aligned_read_comparator(ReadAlignment& read1, ReadAlignment& read2){
+    return read1.pos>read2.pos;
+}
 /* Variations 
  */
 struct GenomeVariation{
@@ -560,7 +564,9 @@ inline int addVarToGenome(int read_coordinate, ReadAlignment& alignment, unsigne
     }
     return 0;
 }
-/*extend the hits to get a full alignment, discover indel and snv at the same time*/
+/*extend the hits to get a full alignment, discover indel and snv at the same time
+ * SNP is also count into MISMATCHES
+ * */
 inline unsigned int extend_hits(unsigned int pos1, unsigned int pos2, 
         const string& read, unsigned int MAX_MISMATCH, ReadAlignment& alignment){
     // search start with smaller pos
@@ -638,6 +644,7 @@ int main(int argc, char* argv[]){
     //genome_duplicates.dump(cout);
     //htab_dump(refGen_hash);
 
+    vector<ReadAlignment> alignments;
     unsigned int baskets[20];
     CODE_TYPE codes[400];
     // read in the fastq file
@@ -725,11 +732,9 @@ int main(int argc, char* argv[]){
         }
 
         /** generate alignment based on the info in basket
-         * 100bp for example
-         * 1st,    2nd      distance   scenorio   score
-         * 6 hits, <=1 hit:   .        PM          10
          */
         ReadAlignment alignment;
+        alignment.read=line; // memory heavy! TODO get a better way to save mem usage
         if( max_count+second_max_count>6 ){
             extend_hits( baskets[2*max_count_b_i], baskets[2*second_max_count_b_i], line, 4, alignment);
             for(int i=0; i<6; i++){
@@ -739,11 +744,32 @@ int main(int argc, char* argv[]){
             }
             fout<<"\n";
         }
+        alignments.push_back(alignment);
+        // TODO, qual is missing, which should be used for variant quality calculation
     }
     unsigned int c_hit_snp=0;
     for(int i=0; i<snp_entries.size(); i++){
         if(snp_hits[i]>0) c_hit_snp++;
     }
+
+    // coverage statistics for each variation
+    for(int i=0; i<alignments.size(); i++){
+        ReadAlignment& alignment = alignments[i];
+        for(unsigned offset=0; offset<alignments[i].read.size(); offset++){
+            unsigned int pos = offset+alignments[i].pos;
+            if(variations.count(pos)>0) variations[pos].c_evidence[2]++;
+        }
+    }
+    for(hash_map<unsigned int, GenomeVariation>::iterator ite=variations.begin(); 
+            ite!=variations.end(); ite++){
+        unsigned int pos = ite->first;
+        GenomeVariation& v = ite->second;
+        fout<<pos<<"\t"<<bitset<8>(v.tag)<<"\t"<<v.c_evidence[0]<<"/"<<v.c_evidence[2]<<"\n";
+    }
+
+    // sort & save all alignments
+    std::sort(alignments.begin(), alignments.end(), aligned_read_comparator);
+
     cout<<"current time in ms: "<<std::time(0)<<endl;
     cout<<"done with hits:"<<c_hit_read<<". Potentially ("<<c_hit_snp<<" snps) discovered"<<endl;
     cout<<"hashtable collisions "<<refGen_hash->collisions-c_collisions<<endl;
