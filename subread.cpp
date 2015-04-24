@@ -506,6 +506,7 @@ class BASKETS{
     }
 };
 /* tag
+ * 0b00------ : 00: known variation in dbSNP
  * 0b01001010 : 01: substititution, 001: C, 010, G
  * 0b10000001 : 10: deletion, 000001, 1 bp deleted
  * 0b11------ : 11: insertion, the following bits record the length of insertion
@@ -515,24 +516,53 @@ struct Variation{
     unsigned char tag;
     public: Variation(){offset=0; tag=0;}
 };
-/* memory usage: 10B in total
+/* memory usage: 10B in total for recording a read mapping to ref
  */
-struct Alignment{
-    unsigned int pos; // alignment started from pos
+struct ReadAlignment{
+    unsigned int pos; // the ReadAlignment could be ordered by pos
+    unsigned char size; // alignment started from pos
     Variation var[6]; // 6 variation for a read at most
-    Alignment(){pos=0;}
-    public: int add(Variation var){
-                unsigned inserted = 0;
-                for(int i=0; i<6; i++){
-                    if(var[i].tag==0) var[i]=var;
-                    inserted = 1;
-                }
-                return inserted;
+    ReadAlignment(){pos=0;}
+    public: int add(Variation _var){
+                if(size>=6) return false;
+                var[size++] = _var;
+                return true;
             }
 };
+/* Variations 
+ */
+struct GenomeVariation{
+    unsigned char tag; // the tag as used in Variation
+    unsigned int c_evidence[3]; //3 slot for stroing different level of evidence
+    public: GenomeVariation(){std::memset(c_evidence,0,3*sizeof(unsigned int));}
+};
+hash_map<unsigned int, GenomeVariation> variations;
+inline int addVarToGenome(int read_coordinate, ReadAlignment& alignment, unsigned int level=0){
+    unsigned int pos = 0;
+    for(int i=0; i<6; i++){
+        Variation var = alignment.var[i];
+        if(var.tag==0) break;
+        pos = read_coordinate + var.offset;
+        if( variations.count(pos)== 0 ) {
+            GenomeVariation genomevariation;
+            genomevariation.tag = var.tag; 
+            genomevariation.c_evidence[level]++;
+            variations.insert( make_pair<unsigned int, GenomeVariation>(pos, genomevariation) );
+            return 0;
+        }
+        if(variations[pos].tag!=0 && variations[pos].tag==var.tag){// same pos, same variation
+            variations[pos].c_evidence[level]++;
+        }else if( variations[pos].tag!=var.tag){//observed different variation on same pos
+            // PUSH INTO TODO LIST
+            cerr<<"multiple mutations in the same site"<<endl;
+        }
+        return 0;
+    }
+    return 0;
+}
 /*extend the hits to get a full alignment, discover indel and snv at the same time*/
 inline unsigned int extend_hits(unsigned int pos1, unsigned int pos2, 
-        const string& read, unsigned int MAX_MISMATCH, Alignment& alignment){
+        const string& read, unsigned int MAX_MISMATCH, ReadAlignment& alignment){
     // search start with smaller pos
     unsigned int pos = pos1<pos2?pos1:pos2;
     const string& context = genome.substr(pos, read.size());
@@ -542,35 +572,37 @@ inline unsigned int extend_hits(unsigned int pos1, unsigned int pos2,
         if(read[i]!=context[i]){
             Variation var;
             var.offset = i;
-            var.tag = 0b01000000+(NT_Code(context[i])<<3)+NT_Code(read[i]);
-            Alignment.add( var );
+            var.tag = 0b01000000+(bitCode(context[i])<<3)+bitCode(read[i]);
+            alignment.add( var );
             if( (++c_mismatch) >= MAX_MISMATCH) break; // stop searching when there are 3 mismatches
         }
     }
     // get a match with no gap open, <=3 mismatches
-    if(i==read.size()) return c_mismatch;
+    if(i==read.size()) { addVarToGenome(pos1, alignment, 0); return c_mismatch; }
     // otherwise search the next hits, for potential gap opennings
-    unsigned int pos = pos1>pos2?pos1:pos2;
-    context = genome.substr(pos, read.size());
+    pos = pos1>pos2?pos1:pos2;
+    const string& context2 = genome.substr(pos, read.size());
     unsigned int j=read.size()-1;
-    for(;j>=0; j--){
-        if(read[j]!=context[j]){
+    for(;j>=1; j--){
+        if(read[j]!=context2[j]){
             Variation var;
             var.offset = i;
-            var.tag = 0b01000000+(NT_Code(context[i])<<3)+NT_Code(read[i]);
-            Alignment.add( var );
+            var.tag = 0b01000000+(bitCode(context2[i])<<3)+bitCode(read[i]);
+            alignment.add( var );
             if( (++c_mismatch) >= MAX_MISMATCH) break; // stop searching when there are 3 mismatches
         }
     }
     Variation var;
-    var.offset = offset;
+    var.offset = i;
     if(j>i) { // insertion
         var.tag = 0b11000000+(j-i);
         alignment.add(var);
+        addVarToGenome(pos1, alignment, 0);
         return 0x20+c_mismatch; 
     } else { // deletion
         var.tag = 0b10000000+(pos2>pos1?(pos2-pos1):(pos1-pos2));
         alignment.add(var);
+        addVarToGenome(pos1, alignment, 0);
         return 0x10+c_mismatch; 
     }
 }
@@ -696,21 +728,17 @@ int main(int argc, char* argv[]){
          * 100bp for example
          * 1st,    2nd      distance   scenorio   score
          * 6 hits, <=1 hit:   .        PM          10
-         * 5 hits, <=1 hit:   .        SNV         10
-         * 4 hits, 2 hit:    <100bp    1 indel     6
-         * 4 hits, 1 hit:    <100bp    1 indel     5
-         * 3 hits, 3 hit:    <100bp    1 indel     6
-         * 3 hits, 2 hit:    <100bp    1 indel     5
-         * 3 hits, 1 hit:    <100bp    1 indel     4
-         * 2 hits, 2 hit:    >100bp    SV          4
-         * 4 hits, 3 hits:    .        repeats     3
-         * 5 hits, 4 hits:    .        repeats     3
-         * 5 hits, 3/2 hits:  .        ?           3
-         * 6 hits, 5 hits:    .        repeats     3
-         * 2 hits, 1 hits:    .        no hit      0
          */
-        string& context = genome.substr();
-        // non-unique hits
+        ReadAlignment alignment;
+        if( max_count+second_max_count>6 ){
+            extend_hits( baskets[2*max_count_b_i], baskets[2*second_max_count_b_i], line, 4, alignment);
+            for(int i=0; i<6; i++){
+                Variation variant = alignment.var[i];
+                if( variant.tag==0 ) break;
+                fout<<variant.offset<<":"<<bitset<8>(variant.tag)<<"\t";
+            }
+            fout<<"\n";
+        }
     }
     unsigned int c_hit_snp=0;
     for(int i=0; i<snp_entries.size(); i++){
