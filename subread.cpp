@@ -517,7 +517,7 @@ class BASKETS{
             SNP_ENTRY& snp_entry = snp_entries[codes[i].pos-0xd0000000];
             cout<<"debug: search test code #"<<i<<"\t"<<codes[i].pos<<"\t"<<snp_entry.pos<<"\t"<<snp_entry.offset<<"\tvs. "<<pos<<"\n";
             // TODO: minus 1 due to db entry, different coordinate system
-            if(snp_entry.pos-snp_entry.offset == pos) c_hit++;
+            if(snp_entry.pos-snp_entry.offset-1 == pos) c_hit++;
             snp_hits[codes[i].pos-0xd0000000]++;
         }
         return c_hit;
@@ -597,68 +597,235 @@ inline unsigned int extend_hits(unsigned int pos1, unsigned int pos2,
         const string& read, unsigned int MAX_MISMATCH, ReadAlignment& alignment){
     // search start with smaller pos
     unsigned int pos = pos1<pos2?pos1:pos2;
-    string context = genome.substr(pos-1, read.size());
-    string context2 = genome.substr(pos-1, read.size());
+    string context = genome.substr(pos1, read.size());
+    string context2 = genome.substr(pos2, read.size());
     std::transform(context.begin(), context.end(),context.begin(), ::toupper);
     std::transform(context2.begin(), context2.end(),context2.begin(), ::toupper);
-    cout<<"debug: pos1="<<pos1<<", pos2="<<pos2<<"\nREA:"<<read<<"\nREF:"<<context<<endl;
+    cout<<"debug: pos1="<<pos1<<", pos2="<<pos2<<"\nREA:"<<read<<" "<<read.size()<<"\nREF:"<<context<<"\nREF:"<<context2<<" "<<context2.size()<<endl;
     unsigned int c_mismatch = 0;
-    unsigned int i=0;
+    unsigned int c_perfect_hits_1 = 0;
+    unsigned int c_perfect_hits_2 = 0;
     unsigned char* match_table = new unsigned char[read.size()];
     std::memset(match_table, 0, read.size());
-    unsigned int c_perfect_hits = 0;
-    for(i=0; i<read.size(); i++) 
-        if(read[i]==context[i] || read[i]==context2[i]){
+    unsigned int pos_sum_1 = 0;
+    unsigned int pos_sum_2 = 0;
+    for(int i=0; i<read.size(); i++){
+        if(read[i]==context[i] ){
             match_table[i] = (match_table[i] | 1);
-            c_perfect_hits++;
+            c_perfect_hits_1++;
+            pos_sum_1 += i;
+        } else if(read[i]==context2[i]){
+            match_table[i] = (match_table[i] | 2);
+            c_perfect_hits_2++;
+            pos_sum_2 += i;
         }
+    }
+    if(c_perfect_hits_1>0) pos_sum_1=pos_sum_1/c_perfect_hits_1;
+    if(c_perfect_hits_2>0) pos_sum_2=pos_sum_2/c_perfect_hits_2;
     // perfect alignment, no mismatch, no gap open
-    if(c_perfect_hits==read.size()) {
+    if( c_perfect_hits_1==read.size() ) {
         addVarToGenome(pos1, alignment, 0); 
-        delete match_table; //release memory
         return 0;
     }
-    // otherwise search for mismatches
-    for(i=0; i<read.size(); i++){
-        if( read[i]!=context[i] && read[i]!=context2[i] ){
-            cout<<"debug "<<read[i]<<":"<<context[i]<<":"<<context2[i]<<endl;
-            Variation var;
-            var.offset = i;
-            var.tag = 0b01000000+(bitCode(context[i])<<3)+bitCode(read[i]);
-            alignment.add( var );
-            if( (++c_mismatch) >= MAX_MISMATCH) { // stop searching when there are too many mismatches
-                cerr<<"too many mismatches"<<endl;
-                break; 
+    // with several mismatches from the major hit
+    if( c_perfect_hits_1>=read.size()-MAX_MISMATCH) {
+        for(int i=0; i<read.size(); i++){
+            if( read[i]!=context[i] && read[i]!=context2[i] ){
+                cout<<"debug "<<read[i]<<":"<<context[i]<<":"<<context2[i]<<endl;
+                if( (++c_mismatch) > MAX_MISMATCH) { // stop searching when there are too many mismatches
+                    cerr<<"too many mismatches during perfect matching"<<endl;
+                    delete match_table; // release memory
+                    return 1; // unmapped
+                }
+                Variation var;
+                var.offset = i;
+                var.tag = 0b01000000+(bitCode(context[i])<<3)+bitCode(read[i]);
+                alignment.add( var );
             }
         }
+        return 0; //success with < MAX_MISMATCH
     }
-    // get a match with no gap open, <=3 mismatches
-    if(i==read.size()) { addVarToGenome(pos1, alignment, 0); return c_mismatch; }
-    // otherwise search the next hits, for potential gap opennings
-    pos = pos1>pos2?pos1:pos2;
-    unsigned int j=read.size()-1;
-    for(;j>=1; j--){
-        if(read[j]!=context2[j]){
-            Variation var;
-            var.offset = i;
-            var.tag = 0b01000000+(bitCode(context2[i])<<3)+bitCode(read[i]);
-            alignment.add( var );
-            if( (++c_mismatch) >= MAX_MISMATCH) break; // stop searching when there are too many mismatches
+    if( pos1!=pos2 && pos_sum_2==pos_sum_1 ) { delete match_table; return 2; }//unmapped;
+    if( pos1==pos2 ) { delete match_table; return 3; } //unmapped;
+
+    // moving average to see the seperating point
+    cout<<"debug pos_sum: #1="<<pos_sum_1<<"\t#2="<<pos_sum_2<<endl;
+    unsigned int sum1=0;
+    unsigned int sum2=0;
+    int sep=0;
+    for(sep=0; sep<read.size()-5; sep+=3){
+        sum1 = sum2; sum2=0;
+        for(int j=0; j<5; j++) sum2+=match_table[sep+j];
+        if(( 2*sum1/5!=2*sum2/5) && sep>0) break;
+    }
+    for(int i=0; i<read.size(); i++) cout<<(int)match_table[i]<<"";
+    cout<<"\ndebug roughly cut="<<sep<<endl;
+    int error_count = 0;
+    for(sep>3?(sep-=3):sep; sep<read.size(); sep++){
+        if( context2[sep]==context[sep] && context[sep]==read[sep] ) continue;
+        if( pos_sum_1<pos_sum_2 ){
+            if( read[sep]!=context[sep] ) break;
+            continue;
         }
+        if( pos_sum_2<pos_sum_1 ){
+            if( read[sep]!=context2[sep] ) break;
+            continue;
+        }
+        cerr<<"can't find the cut position for double hits"<<endl; delete match_table; return 4;
     }
-    Variation var;
-    var.offset = i;
-    if(j>i) { // insertion
-        var.tag = 0b11000000+(j-i);
+    cout<<"exact cut="<<sep<<endl;
+
+    // reset mismatch and search for indels
+    c_mismatch = 0;
+    // find with insertions by pos_sum and pos info
+    /*    ---------------III-------------
+     *    pos1-----------
+     *                     pos2----------
+     *pos2---------- (-shift, woule be less than pos1)
+     */
+    if( pos1>pos2 && pos_sum_1 < pos_sum_2 ){
+        // search from left
+        for(int i=0; i<sep; i++){
+            if(read[i]!=context[i]){
+                if( (++c_mismatch) > MAX_MISMATCH) { // stop searching when there are too many mismatches
+                    cerr<<"too many mismatches finding ins case #1.1"<<endl;
+                    delete match_table; return 1;
+                }
+                Variation var;
+                var.offset = i;
+                var.tag = 0b01000000+(bitCode(context[i])<<3)+bitCode(read[i]);
+                alignment.add( var );
+                cout<<"mismatch "<<__LINE__<<endl;
+            }
+        }
+        for(int j=read.size()-1; j>=sep+pos1-pos2; j--){
+            if(read[j]!=context2[j]){
+                if( (++c_mismatch) > MAX_MISMATCH) { // stop searching when there are too many mismatches
+                    cerr<<"too many mismatches finding ins case #1.2"<<endl;
+                    delete match_table; return 1;
+                }
+                Variation var;
+                var.offset = j;
+                var.tag = 0b01000000+(bitCode(context2[j])<<3)+bitCode(read[j]);
+                alignment.add( var );
+                cout<<"mismatch "<<__LINE__<<endl;
+            }
+        }
+        Variation var;
+        var.offset = sep;
+        var.tag = 0b10000000+((pos1-pos2)>64?64:(pos1-pos2)); // if ins is large/equal than 64, kept 64
         alignment.add(var);
-        addVarToGenome(pos1, alignment, 0);
-        return 0x20+c_mismatch; 
-    } else { // deletion
-        var.tag = 0b10000000+(pos2>pos1?(pos2-pos1):(pos1-pos2));
-        alignment.add(var);
-        addVarToGenome(pos1, alignment, 0);
-        return 0x10+c_mismatch; 
+        cout<<"ins at "<<sep<<"   "<<__LINE__<<endl;
     }
+
+    // the reverse of previous case
+    if( pos2>pos1 && pos_sum_2 < pos_sum_1 ){
+        // search from left
+        for(int i=0; i<sep; i++){
+            if(read[i]!=context2[i]){
+                if( (++c_mismatch) >= MAX_MISMATCH) { // stop searching when there are too many mismatches
+                    cerr<<"too many mismatches finding ins #2.1"<<endl;
+                    delete match_table; return 1;
+                }
+                Variation var;
+                var.offset = i;
+                var.tag = 0b01000000+(bitCode(context2[i])<<3)+bitCode(read[i]);
+                alignment.add( var );
+                cout<<"mismatch "<<__LINE__<<endl;
+            }
+        }
+        for(int j=read.size()-1; j>=sep+pos2-pos1; j--){
+            if(read[j]!=context[j]){
+                if( (++c_mismatch) >= MAX_MISMATCH) { // stop searching when there are too many mismatches
+                    cerr<<"too many mismatches finding ins #2.2"<<endl;
+                    delete match_table; return 1;
+                }
+                Variation var;
+                var.offset = j;
+                var.tag = 0b01000000+(bitCode(context[j])<<3)+bitCode(read[j]);
+                alignment.add( var );
+                cout<<"mismatch "<<__LINE__<<endl;
+            }
+        }
+        Variation var;
+        var.offset = sep;
+        var.tag = 0b10000000+((pos2-pos1)>64?64:(pos2-pos1)); // if ins is large/equal than 64, kept 64
+        alignment.add(var);
+        cout<<"ins at "<<sep<<"   "<<__LINE__<<endl;
+    }
+
+    // find deletions 
+    /*   ----------------
+     *pos1-------pos2----
+     *   pos2---- (-shift)
+     */
+    if( pos1<pos2 && pos_sum_1 < pos_sum_2 ){
+        // search from left
+        for(int i=0; i<sep; i++){
+            if(read[i]!=context[i]){
+                if( (++c_mismatch) >= MAX_MISMATCH) { // stop searching when there are too many mismatches
+                    cerr<<"too many mismatches finding del #1.1"<<endl;
+                    delete match_table; return 1;
+                }
+                Variation var;
+                var.offset = i;
+                var.tag = 0b01000000+(bitCode(context[i])<<3)+bitCode(read[i]);
+                alignment.add( var );
+            }
+        }
+        for(int j=read.size()-1; j>=sep; j--){
+            if(read[j]!=context2[j]){
+                if( (++c_mismatch) >= MAX_MISMATCH) { // stop searching when there are too many mismatches
+                    cerr<<"too many mismatches finding del #1.2 [offset="<<j<<","<<read[j]<<","<<context2[j]<<"]"<<endl;
+                    delete match_table; return 1;
+                }
+                Variation var;
+                var.offset = j;
+                var.tag = 0b01000000+(bitCode(context2[j])<<3)+bitCode(read[j]);
+                alignment.add( var );
+            }
+        }
+        Variation var;
+        var.offset = sep;
+        var.tag = 0b11000000+((pos2-pos1)>64?64:(pos1-pos2)); // if ins is large/equal than 64, kept 64
+        alignment.add(var);
+        cout<<"add a del in "<<(int)var.offset<<endl;
+    }
+    // the reverse of previous case
+    if( pos1>pos2 && pos_sum_2 < pos_sum_1 ){
+        // search from left
+        for(int i=0; i<sep; i++){
+            if(read[i]!=context2[i]){
+                if( (++c_mismatch) >= MAX_MISMATCH) { // stop searching when there are too many mismatches
+                    cerr<<"too many mismatches finding del #2.1"<<endl;
+                    delete match_table; return 1;
+                }
+                Variation var;
+                var.offset = i;
+                var.tag = 0b01000000+(bitCode(context2[i])<<3)+bitCode(read[i]);
+                alignment.add( var );
+            }
+        }
+        for(int j=read.size()-1; j>=sep; j--){
+            if(read[j]!=context[j]){
+                if( (++c_mismatch) >= MAX_MISMATCH) { // stop searching when there are too many mismatches
+                    cerr<<"too many mismatches finding del #2.2"<<endl;
+                    delete match_table; return 1;
+                }
+                Variation var;
+                var.offset = j;
+                var.tag = 0b01000000+(bitCode(context[j])<<3)+bitCode(read[j]);
+                alignment.add( var );
+            }
+        }
+        Variation var;
+        var.offset = sep;
+        var.tag = 0b11000000+((pos1-pos2)>64?64:(pos1-pos2)); // if ins is large/equal than 64, kept 64
+        alignment.add(var);
+    }
+    
+    delete match_table;
+    return 0;
 }
 inline bool insert_basket(unsigned int* baskets, unsigned int pos){
     bool inserted = false;
@@ -753,7 +920,7 @@ int main(int argc, char* argv[]){
                 //cout<<"hit multiple entries"<<endl;
             }else if(val->pos >= 0xd0000000){ // run into previous known variation
                 unsigned int idx = val->pos-0xd0000000;
-                pos = snp_entries[idx].pos-snp_entries[idx].offset;
+                pos = snp_entries[idx].pos-snp_entries[idx].offset-1;
                 if(snp_entries[idx].pos>snp_entries[idx].offset) {
                     inserted = insert_basket(baskets, pos);
                     snp_baskets.insert(*val);
@@ -769,14 +936,16 @@ int main(int argc, char* argv[]){
         max_count=0; second_max_count = 0;
         for(int b_i=0; b_i<10; b_i++){
             if( baskets[2*b_i+1] > max_count ){
+                second_max_count = max_count;
+                second_max_count_b_i = max_count_b_i;
                 max_count = baskets[2*b_i+1];
                 max_count_b_i = b_i;
+                continue;
             }
-            if( baskets[2*b_i+1] < max_count && baskets[2*b_i+1] > second_max_count ){
+            if( baskets[2*b_i+1] > second_max_count ){
                 second_max_count = baskets[2*b_i+1];
                 second_max_count_b_i = b_i;
             }
-            cout<<"basket#"<<b_i<<"\tpos="<<baskets[b_i*2]<<"\tcount="<<baskets[b_i*2+1]<<endl;
         }
         if(max_count<1) continue; // 5*16=80bp, 1 mismatch in 100bp
         c_hit_read++;
@@ -799,13 +968,25 @@ int main(int argc, char* argv[]){
         ReadAlignment alignment;
         alignment.read=line; // memory heavy! TODO get a better way to save mem usage
         if( max_count+second_max_count>0 ){ //SETTO 0 temporarily
-            extend_hits( baskets[2*max_count_b_i], baskets[2*second_max_count_b_i], line, 4, alignment);
+            int ret = extend_hits( baskets[2*max_count_b_i], baskets[2*second_max_count_b_i], line, 4, alignment);
+            if( ret!=0 ){
+                cout<<"un-mapped"<<endl;
+            }
+            char* pattern = new char[line.size()+1];
+            char alphabet[4] = {'.', 'X','I','-'};
+            for(int idx=0; idx<line.size(); idx++) pattern[idx]='.';
             for(int i=0; i<6; i++){
                 Variation variant = alignment.var[i];
                 if( variant.tag==0 ) break;
+                pattern[ (unsigned short)variant.offset ] = alphabet[(variant.tag>>6)];
+                if( (variant.tag>>6)==0b10 ){
+                    for(int j=1; j< (int)(variant.tag-0b10000000); j++)
+                        pattern[ (unsigned short)variant.offset + j ] = 'I';
+                }
                 cout<<(unsigned short)variant.offset<<":"<<bitset<8>(variant.tag)<<"\t";
             }
-            cout<<"\n";
+            pattern[line.size()]=0;
+            cout<<"\nPTN:"<<pattern<<"\n";
         }
         alignments.push_back(alignment);
         // TODO, qual is missing, which should be used for variant quality calculation
