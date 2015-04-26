@@ -380,7 +380,8 @@ struct SNP_ENTRY{
     CODE_TYPE code; // usable codon
     unsigned int pos; //genomic position
     unsigned char offset; // SNP offset on the code
-    SNP_ENTRY(){rsid=0; code=0; pos=0; offset=0;}
+    unsigned char type; // SNV 0b01, Ins 0b10(64 size info), Del 0b11(64 size info)
+    SNP_ENTRY(){rsid=0; code=0; pos=0; offset=0;type=0b01;}
 };
 vector<SNP_ENTRY> snp_entries;
 void dump_snps(ostream& out){
@@ -924,6 +925,13 @@ int main(int argc, char* argv[]){
                 if(snp_entries[idx].pos>snp_entries[idx].offset) {
                     inserted = insert_basket(baskets, pos);
                     snp_baskets.insert(*val);
+                    // additional benifits from indel SNPs
+                    unsigned char type = snp_entries[idx].type;
+                    if( (type>>6) == 0b10 ){ //ins
+                        insert_basket(baskets, pos-(type-0b10000000));
+                    }else if( (type>>6) == 0b11 ){ //del
+                        insert_basket(baskets, pos+(type-0b11000000));
+                    }
                     cout<<"hit snp entries: "<<snp_entries[idx].rsid<<"\t"<<pos<<"\t"<<decodeSubread(snp_entries[idx].code)<<"\t"<<i<<":"<<line.substr(i,16)<<endl;
                 }
             }else{
